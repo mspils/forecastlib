@@ -79,7 +79,7 @@ def dtw(prototype, sample, return_flag=RETURN_VALUE, slope_constraint="asymmetri
     return DTW[-1, -1]
 
 
-def _cummulative_matrix(cost, slope_constraint, window):
+def _cummulative_matrix(cost, slope_constraint, window) -> np.ndarray:
     p = cost.shape[0]
     s = cost.shape[1]
 

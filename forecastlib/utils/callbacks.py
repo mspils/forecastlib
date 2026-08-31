@@ -8,7 +8,6 @@ from sklearn.preprocessing import StandardScaler
 
 import forecastlib.utils.metrics as mt
 from forecastlib.models.LightningWrapper import CustomLightningModule, EnsembleModule, UncertaintyLightningModule
-from forecastlib.data_provider.data_loader import Dataset_Diff
 from forecastlib.utils.quantile import (
     coverage_series,
     interval_width_series,
@@ -465,9 +464,7 @@ class StepWiseMetricsCallbackWaterlevel(Callback):
                     metric_dict[full_m_name] = m_function(true[mask], pred[mask])
 
                 if quantiles is not None:
-                    metric_dict[f"{subset_name}_pinball{f_name}"] = pinball_series(
-                        true[mask], pred_q[mask], quantiles
-                    )
+                    metric_dict[f"{subset_name}_pinball{f_name}"] = pinball_series(true[mask], pred_q[mask], quantiles)
                     metric_dict[f"{subset_name}_crossing{f_name}"] = quantile_crossing_series(pred_q[mask])
                     # Symmetric bands, widest first: (q10,q90) for the default levels.
                     for i in range(len(quantiles) // 2):
@@ -491,35 +488,31 @@ class StepWiseMetricsCallbackWaterlevel(Callback):
                             axis=0
                         )
 
-
         if trainer.datamodule.hparams.get("features") == "M":
             print("Warning, pretty much untested")
-            #if isinstance(trainer.datamodule.train_set,Dataset_Diff):
+            # if isinstance(trainer.datamodule.train_set,Dataset_Diff):
             if getattr(trainer.datamodule.train_set, "_supports_multicol", False):
-
                 cols = trainer.datamodule.train_set.data_x_raw.columns
                 if trainer.datamodule.hparams.get("diff"):
-                    cols = cols[:len(cols) // 2]
-
+                    cols = cols[: len(cols) // 2]
 
                 for i in range(pl_module.hparams.pred_len):
                     tmp_metrics = {f"{k}": v[i].mean().item() for k, v in metric_dict.items()}
 
                     if self.col_wise:
-                        tmp_metrics = tmp_metrics | {f"{k}_{cols[j]}": v[i,j].item() for k, v in metric_dict.items() for j in range(len(cols))}
+                        tmp_metrics = tmp_metrics | {
+                            f"{k}_{cols[j]}": v[i, j].item() for k, v in metric_dict.items() for j in range(len(cols))
+                        }
 
-                    trainer.logger.log_metrics(tmp_metrics,step=i+1)
+                    trainer.logger.log_metrics(tmp_metrics, step=i + 1)
             else:
                 for i in range(pl_module.hparams.pred_len):
                     mean_metrics = {f"{k}": v[i].mean().item() for k, v in metric_dict.items()}
-                    trainer.logger.log_metrics(mean_metrics,step=i+1)
+                    trainer.logger.log_metrics(mean_metrics, step=i + 1)
 
         else:
-
             for i in range(pl_module.hparams.pred_len):
-                trainer.logger.log_metrics({k: v[i].item()
-                                            for k, v in metric_dict.items()}, step=i+1)
-
+                trainer.logger.log_metrics({k: v[i].item() for k, v in metric_dict.items()}, step=i + 1)
 
         self.metric_dict = metric_dict
 

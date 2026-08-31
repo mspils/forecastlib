@@ -1,3 +1,6 @@
+"""
+Ths moduls doesn't work currently, due to problems with the mamba_ssm package. It is kept here for reference, but should not be used.
+"""
 import math
 
 import torch

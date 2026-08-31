@@ -8,30 +8,12 @@ from torch.utils.data import DataLoader
 from forecastlib.data_provider.data_loader import (
     Dataset_Custom,
     Dataset_Diff,
-    Dataset_ETT_hour,
-    Dataset_ETT_minute,
-    Dataset_M4,
     Dataset_MW,
-    MSLSegLoader,
-    PSMSegLoader,
-    SMAPSegLoader,
-    SMDSegLoader,
-    SWATSegLoader,
 )
 from forecastlib.utils.tools import ConfigTracker, load_model_settings
 
 data_dict = {
-    "ETTh1": Dataset_ETT_hour,
-    "ETTh2": Dataset_ETT_hour,
-    "ETTm1": Dataset_ETT_minute,
-    "ETTm2": Dataset_ETT_minute,
     "custom": Dataset_Custom,
-    "m4": Dataset_M4,
-    "PSM": PSMSegLoader,
-    "MSL": MSLSegLoader,
-    "SMAP": SMAPSegLoader,
-    "SMD": SMDSegLoader,
-    "SWAT": SWATSegLoader,
     "Diff": Dataset_Diff,
     "MW": Dataset_MW,
 }
@@ -65,7 +47,6 @@ class CustomDataModule(pl.LightningDataModule):
 
         self.Dataset_class = self._resolve_dataset_class(self.args.data)
         self.data_name = self._get_dataset_name(self.args.data)
-        # self.args = args
         self.args.timeenc = 0 if self.args.embed != "timeF" else 1
 
         self.num_workers = self.args.num_workers
@@ -75,22 +56,17 @@ class CustomDataModule(pl.LightningDataModule):
         self.test_set = None
         self.setup("fit")
 
-        # temp_hparams = {x :args.__dict__[x]  for x in inspect.signature(self.Dataset_class).parameters if x not in ["args",'flag','size']}
         temp_hparams = {}
         for k in self.args.accessed_attrs:
             temp_hparams[k] = self.data_name if k == "data" else self.args[k]
-        # | {x :args.__dict__[x]  for x in inspect.signature(self.Dataset_class).parameters if x not in ["args",'flag','size']}
-        temp_hparams |= {  #'augmentation_ratio' : args.augmentation_ratio,
-            #'seq_len' : args.seq_len,
-            #'label_len' : args.label_len,
-            #'pred_len' :args.pred_len,
+        temp_hparams |= {
             "batch_size": self.args.batch_size,
             "scaler": pickle.dumps(self.scaler),
         }
         self.save_hyperparameters(temp_hparams, logger=False)
-        self.save_hyperparameters({
-            k: temp_hparams[k] for k in ["batch_size", "data_path", "target"]
-        })  # These are also logged to tensorboard
+        self.save_hyperparameters(
+            {k: temp_hparams[k] for k in ["batch_size", "data_path", "target"]}
+        )  # These are also logged to tensorboard
         # TODO Differencing
 
     @classmethod
@@ -121,7 +97,6 @@ class CustomDataModule(pl.LightningDataModule):
                 target=args.target,
                 timeenc=args.timeenc,
                 freq=args.freq,
-                # seasonal_patterns=args.seasonal_patterns This will break stuff for the m4 dataset, can't change the seasonal patterns there
             )
 
             self.train_set = data_set_template(flag="train", args=args)

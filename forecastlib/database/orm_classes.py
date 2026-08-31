@@ -80,15 +80,6 @@ class Model(Base):
 
     id: Mapped[int] = mapped_column(
         INTEGER,
-        # Identity(
-        #     start=1,
-        #     increment=1,
-        #     minvalue=1,
-        #     maxvalue=9999999999,
-        #     cycle=False,
-        #     cache=20,
-        #     order=False
-        # ),
         Sequence("MODELL_SEQ"),
         primary_key=True,
     )
@@ -142,12 +133,10 @@ class Sensor(Base):
     beschreibung: Mapped[str | None] = mapped_column(VARCHAR(500))
     has_ext_forecast: Mapped[int | None] = mapped_column(INTEGER)
 
-    # input_forecasts: Mapped[List['InputForecasts']] = relationship('InputForecasts', back_populates='sensor')
     input_forecasts_long: Mapped[list["InputForecastsLong"]] = relationship(
         "InputForecastsLong", back_populates="sensor"
     )
     model_sensor: Mapped[list["ModelSensor"]] = relationship("ModelSensor", back_populates="sensor")
-    # pegel_forecasts: Mapped[List['PegelForecasts']] = relationship('PegelForecasts', back_populates='sensor')
     pegel_forecasts_long: Mapped[list["PegelForecastsLong"]] = relationship(
         "PegelForecastsLong", back_populates="sensor"
     )
@@ -229,11 +218,6 @@ class PegelForecastsLong(Base):
         PrimaryKeyConstraint("sensor_name", "model_id", "member", "tstamp", "horizon_step", name="SYS_C009006"),
     )
 
-    # id: Mapped[float] = mapped_column(
-    #    NUMBER(38, 0, False),
-    #    Identity(start=1, increment=1, minvalue=1, maxvalue=9999999999999999999999999999, cycle=False, cache=20, order=False),
-    #    primary_key=True
-    # )
     sensor_name: Mapped[str] = mapped_column(VARCHAR(256))
     model_id: Mapped[int] = mapped_column(INTEGER, nullable=False)
     tstamp: Mapped[datetime.datetime] = mapped_column(TIMESTAMP)
@@ -251,7 +235,6 @@ class ModelBlob(Base):
     __table_args__ = (
         ForeignKeyConstraint(["model_id"], ["model.id"], name="FK_MODEL_BLOB_MODEL", ondelete="CASCADE"),
         PrimaryKeyConstraint("model_id", name="SYS_C009012"),
-        # UniqueConstraint('model_id', name='uq_modell_blob_model_id')
     )
 
     model_id: Mapped[int] = mapped_column(INTEGER, nullable=False)

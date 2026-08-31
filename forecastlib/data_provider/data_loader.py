@@ -1,11 +1,7 @@
 """Data loading utilities for time series forecasting datasets.
 
 This module provides various PyTorch Dataset implementations for loading and
-preprocessing time series data from different sources including:
-- Electricity Transformer Temperature (ETT) datasets
-- M4 competition data
-- UEA time series classification datasets
-- Custom datasets compatible with forecasting models
+preprocessing time series data from different sources.
 
 Supports multiple data splits (train/val/test), feature modes (univariate/multivariate),
 scaling, time encoding, and data augmentation.
@@ -15,7 +11,7 @@ import glob
 import os
 import re
 import warnings
-from typing import Any
+from typing import Any, Literal, get_args
 
 import numpy as np
 import pandas as pd
@@ -23,300 +19,55 @@ import torch
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from torch.utils.data import Dataset
 
-from forecastlib.data_provider.m4 import M4Dataset, M4Meta
-from forecastlib.data_provider.uea import Normalizer, interpolate_missing, subsample
 from forecastlib.utils.augmentation import run_augmentation_single
 from forecastlib.utils.timefeatures import FREQ_MAP, get_data_stamp, time_features, time_features_from_frequency_str
 
 warnings.filterwarnings("ignore")
 
+Features = Literal["M", "MS", "S"]
+FEATURE_TYPES = get_args(Features)
 
-class Dataset_ETT_hour(Dataset):  # noqa: N801
-    """PyTorch Dataset for Electricity Transformer Temperature (ETT) hourly data.
 
-    Loads hourly ETT dataset with configurable train/val/test splits, feature modes,
-    and preprocessing options. Supports univariate (single target) and multivariate
-    (all features) forecasting, with optional scaling and augmentation.
+class BaseForecastDataset(Dataset):
+    """Shared initialization for the forecasting datasets in this module.
 
-    Args:
-        args: Configuration namespace with attributes like augmentation_ratio.
-        root_path: Directory containing the data CSV file.
-        flag: Data split - "train", "val", or "test". Defaults to "train".
-        size: Tuple of (seq_len, label_len, pred_len). Defaults to (96, 48, 96).
-        features: Feature mode - "S" (univariate), "M" (multivariate all), or
-            "MS" (multivariate with target). Defaults to "S".
-        data_path: CSV filename. Defaults to "ETTh1.csv".
-        target: Target column name for univariate mode. Defaults to "OT".
-        scale: Whether to normalize data with StandardScaler. Defaults to True.
-        timeenc: Time encoding mode (0=discrete, 1=continuous). Defaults to 0.
-        freq: Frequency string for time features. Defaults to "h" (hourly).
-        seasonal_patterns: Optional seasonal patterns info (unused). Defaults to None.
-
+    Subclasses resolve their own ``size`` defaults, call ``super().__init__``
+    with a ``(seq_len, label_len, pred_len)`` tuple, then perform any
+    dataset-specific setup before calling ``self.__read_data__()``.
     """
 
     def __init__(
         self,
         args,
-        root_path: str,
-        flag: str = "train",
-        size: tuple[int, int, int] | None = None,
-        features: str = "S",
-        data_path: str = "ETTh1.csv",
-        target: str = "OT",
-        scale: bool = True,
-        timeenc: int = 0,
-        freq: str = "h",
-        seasonal_patterns: Any | None = None,
-    ) -> None:
-        """Initialize ETT hourly dataset.
-
-        Args:
-            args: Configuration object with augmentation parameters.
-            root_path: Base path to data directory.
-            flag: Dataset split ("train", "val", or "test").
-            size: Window sizes as (input_len, label_len, forecast_len).
-            features: Feature selection mode.
-            data_path: Path to data CSV relative to root_path.
-            target: Target column name.
-            scale: Enable data normalization.
-            timeenc: Time encoding method.
-            freq: Time series frequency.
-            seasonal_patterns: Optional metadata about seasonality.
-
-        """
-        # size [seq_len, label_len, pred_len]
-        self.args = args
-        # info
-        if size is None:
-            self.seq_len = 24 * 4 * 4
-            self.label_len = 24 * 4
-            self.pred_len = 24 * 4
-        else:
-            self.seq_len = size[0]
-            self.label_len = size[1]
-            self.pred_len = size[2]
-        # init
-        assert flag in ["train", "test", "val"]
-        type_map = {"train": 0, "val": 1, "test": 2}
-        self.set_type = type_map[flag]
-
-        self.features = features
-        self.target = target
-        self.scale = scale
-        self.timeenc = timeenc
-        self.freq = freq
-
-        self.root_path = root_path
-        self.data_path = data_path
-        self.__read_data__()
-
-    def __read_data__(self) -> None:
-        """Load and preprocess ETT data from CSV file.
-
-        Performs the following steps:
-        1. Read CSV file and select features
-        2. Split data into train/val/test based on configuration
-        3. Fit scaler on training data if scaling enabled
-        4. Generate time encodings for all timestamps
-        5. Apply data augmentation if in training mode
-
-        Returns:
-            None (modifies self.data_x, self.data_y, self.data_stamp)
-
-        """
-        self.scaler = StandardScaler()
-        df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
-
-        border1s = [0, 12 * 30 * 24 - self.seq_len, 12 * 30 * 24 + 4 * 30 * 24 - self.seq_len]
-        border2s = [12 * 30 * 24, 12 * 30 * 24 + 4 * 30 * 24, 12 * 30 * 24 + 8 * 30 * 24]
-        border1 = border1s[self.set_type]
-        border2 = border2s[self.set_type]
-
-        if self.features in {"M", "MS"}:
-            cols_data = df_raw.columns[1:]
-            df_data = df_raw[cols_data]
-        elif self.features == "S":
-            df_data = df_raw[[self.target]]
-
-        if self.scale:
-            train_data = df_data[border1s[0] : border2s[0]]
-            self.scaler.fit(train_data.values)
-            data = self.scaler.transform(df_data.values)
-        else:
-            data = df_data.values
-
-        df_stamp = df_raw[["date"]][border1:border2]
-        df_stamp["date"] = pd.to_datetime(df_stamp.date)
-
-        data_stamp = get_data_stamp(df_stamp, self.timeenc, self.freq)
-
-        self.data_x = data[border1:border2]
-        self.data_y = data[border1:border2]
-
-        if self.set_type == 0 and self.args.augmentation_ratio > 0:
-            self.data_x, self.data_y, _augmentation_tags = run_augmentation_single(self.data_x, self.data_y, self.args)
-
-        self.data_stamp = data_stamp
-
-    def __getitem__(self, index: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Get a single batch sample.
-
-        Returns a window of size (seq_len, label_len, pred_len) containing:
-        - Input sequence (seq_len timesteps)
-        - Target sequence (label_len + pred_len timesteps)
-        - Time encodings for input and target sequences
-
-        Args:
-            index: Index of the sample to retrieve.
-
-        Returns:
-            Tuple of (seq_x, seq_y, seq_x_mark, seq_y_mark) where:
-                - seq_x: Input features of shape (seq_len, num_features)
-                - seq_y: Target values of shape (label_len + pred_len, num_features)
-                - seq_x_mark: Time encodings for input
-                - seq_y_mark: Time encodings for target
-
-        """
-        s_begin = index
-        s_end = s_begin + self.seq_len
-        r_begin = s_end - self.label_len
-        r_end = r_begin + self.label_len + self.pred_len
-
-        seq_x = self.data_x[s_begin:s_end]
-        seq_y = self.data_y[r_begin:r_end]
-        seq_x_mark = self.data_stamp[s_begin:s_end]
-        seq_y_mark = self.data_stamp[r_begin:r_end]
-
-        return seq_x, seq_y, seq_x_mark, seq_y_mark
-
-    def __len__(self) -> int:
-        """Return the total number of samples in the dataset.
-
-        Returns:
-            Number of non-overlapping windows that can be created.
-
-        """
-        return len(self.data_x) - self.seq_len - self.pred_len + 1
-
-    def inverse_transform(self, data: np.ndarray) -> np.ndarray:
-        """Inverse transform scaled data back to original scale.
-
-        Args:
-            data: Scaled data array.
-
-        Returns:
-            Original scale data.
-
-        """
-        return self.scaler.inverse_transform(data)
-
-
-class Dataset_ETT_minute(Dataset):
-    def __init__(
-        self,
-        args,
         root_path,
-        flag="train",
-        size=None,
-        features="S",
-        data_path="ETTm1.csv",
-        target="OT",
-        scale=True,
-        timeenc=0,
-        freq="t",
-        seasonal_patterns=None,
+        data_path,
+        flag,
+        size,
+        features,
+        target,
+        timeenc,
+        freq,
     ) -> None:
         # size [seq_len, label_len, pred_len]
         self.args = args
-        # info
-        if size is None:
-            self.seq_len = 24 * 4 * 4
-            self.label_len = 24 * 4
-            self.pred_len = 24 * 4
-        else:
-            self.seq_len = size[0]
-            self.label_len = size[1]
-            self.pred_len = size[2]
-        # init
-        assert flag in ["train", "test", "val"]
-        type_map = {"train": 0, "val": 1, "test": 2}
-        self.set_type = type_map[flag]
+        self.seq_len, self.label_len, self.pred_len = size
 
+        assert flag in {"train", "val", "test"}
+        self.set_type = {"train": 0, "val": 1, "test": 2}[flag]
+
+        if features not in FEATURE_TYPES:
+            msg = f"Invalid feature type: {features!r}"
+            raise ValueError(msg)
         self.features = features
+
         self.target = target
-        self.scale = scale
         self.timeenc = timeenc
         self.freq = freq
-
         self.root_path = root_path
         self.data_path = data_path
-        self.__read_data__()
-
-    def __read_data__(self):
-        self.scaler = StandardScaler()
-        df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
-
-        border1s = [0, 12 * 30 * 24 * 4 - self.seq_len, 12 * 30 * 24 * 4 + 4 * 30 * 24 * 4 - self.seq_len]
-        border2s = [12 * 30 * 24 * 4, 12 * 30 * 24 * 4 + 4 * 30 * 24 * 4, 12 * 30 * 24 * 4 + 8 * 30 * 24 * 4]
-        border1 = border1s[self.set_type]
-        border2 = border2s[self.set_type]
-
-        if self.features in {"M", "MS"}:
-            cols_data = df_raw.columns[1:]
-            df_data = df_raw[cols_data]
-        elif self.features == "S":
-            df_data = df_raw[[self.target]]
-
-        if self.scale:
-            train_data = df_data[border1s[0] : border2s[0]]
-            self.scaler.fit(train_data.values)
-            data = self.scaler.transform(df_data.values)
-        else:
-            data = df_data.values
-
-        df_stamp = df_raw[["date"]][border1:border2]
-        df_stamp["date"] = pd.to_datetime(df_stamp.date)
-        if self.timeenc == 0:
-            df_stamp["month"] = df_stamp.date.apply(lambda row: row.month, 1)
-            df_stamp["day"] = df_stamp.date.apply(lambda row: row.day, 1)
-            df_stamp["weekday"] = df_stamp.date.apply(lambda row: row.weekday(), 1)
-            df_stamp["hour"] = df_stamp.date.apply(lambda row: row.hour, 1)
-            df_stamp["minute"] = df_stamp.date.apply(lambda row: row.minute, 1)
-            df_stamp["minute"] = df_stamp.minute.map(lambda x: x // 15)
-            data_stamp = df_stamp.drop(["date"], 1).values
-        elif self.timeenc == 1:
-            data_stamp = time_features(pd.to_datetime(df_stamp["date"].values), freq=self.freq)
-            data_stamp = data_stamp.transpose(1, 0)
-
-        self.data_x = data[border1:border2]
-        self.data_y = data[border1:border2]
-
-        if self.set_type == 0 and self.args.augmentation_ratio > 0:
-            self.data_x, self.data_y, _augmentation_tags = run_augmentation_single(self.data_x, self.data_y, self.args)
-
-        self.data_stamp = data_stamp
-
-    def __getitem__(self, index):
-        s_begin = index
-        s_end = s_begin + self.seq_len
-        r_begin = s_end - self.label_len
-        r_end = r_begin + self.label_len + self.pred_len
-
-        seq_x = self.data_x[s_begin:s_end]
-        seq_y = self.data_y[r_begin:r_end]
-        seq_x_mark = self.data_stamp[s_begin:s_end]
-        seq_y_mark = self.data_stamp[r_begin:r_end]
-
-        return seq_x, seq_y, seq_x_mark, seq_y_mark
-
-    def __len__(self) -> int:
-        return len(self.data_x) - self.seq_len - self.pred_len + 1
-
-    def inverse_transform(self, data):
-        return self.scaler.inverse_transform(data)
 
 
-class Dataset_Custom(Dataset):
+class Dataset_Custom(BaseForecastDataset):
     def __init__(
         self,
         args,
@@ -331,30 +82,11 @@ class Dataset_Custom(Dataset):
         freq="h",
         seasonal_patterns=None,
     ) -> None:
-        # size [seq_len, label_len, pred_len]
-        self.args = args
-        # info
         if size is None:
-            self.seq_len = 24 * 4 * 4
-            self.label_len = 24 * 4
-            self.pred_len = 24 * 4
-        else:
-            self.seq_len = size[0]
-            self.label_len = size[1]
-            self.pred_len = size[2]
-        # init
-        assert flag in ["train", "test", "val"]
-        type_map = {"train": 0, "val": 1, "test": 2}
-        self.set_type = type_map[flag]
+            size = (24 * 4 * 4, 24 * 4, 24 * 4)
+        super().__init__(args, root_path, data_path, flag, size, features, target, timeenc, freq)
 
-        self.features = features
-        self.target = target
         self.scale = scale
-        self.timeenc = timeenc
-        self.freq = freq
-
-        self.root_path = root_path
-        self.data_path = data_path
         self.__read_data__()
 
     def __read_data__(self):
@@ -379,7 +111,7 @@ class Dataset_Custom(Dataset):
         if self.features in {"M", "MS"}:
             cols_data = df_raw.columns[1:]
             df_data = df_raw[cols_data]
-        elif self.features == "S":
+        else:  # "S", validated in __init__
             df_data = df_raw[[self.target]]
 
         if self.scale:
@@ -392,14 +124,17 @@ class Dataset_Custom(Dataset):
         df_stamp = df_raw[["date"]][border1:border2]
         df_stamp["date"] = pd.to_datetime(df_stamp.date)
         if self.timeenc == 0:
-            df_stamp["month"] = df_stamp.date.apply(lambda row: row.month, 1)
-            df_stamp["day"] = df_stamp.date.apply(lambda row: row.day, 1)
-            df_stamp["weekday"] = df_stamp.date.apply(lambda row: row.weekday(), 1)
-            df_stamp["hour"] = df_stamp.date.apply(lambda row: row.hour, 1)
-            data_stamp = df_stamp.drop(["date"], 1).values
+            df_stamp["month"] = df_stamp.date.apply(lambda row: row.month)
+            df_stamp["day"] = df_stamp.date.apply(lambda row: row.day)
+            df_stamp["weekday"] = df_stamp.date.apply(lambda row: row.weekday())
+            df_stamp["hour"] = df_stamp.date.apply(lambda row: row.hour)
+            data_stamp = df_stamp.drop(["date"], axis=1).values
         elif self.timeenc == 1:
             data_stamp = time_features(pd.to_datetime(df_stamp["date"].values), freq=self.freq)
             data_stamp = data_stamp.transpose(1, 0)
+        else:
+            msg_0 = f"Invalid timeenc value: {self.timeenc}"
+            raise ValueError(msg_0)
 
         self.data_x = data[border1:border2]
         self.data_y = data[border1:border2]
@@ -429,341 +164,9 @@ class Dataset_Custom(Dataset):
         return self.scaler.inverse_transform(data)
 
 
-class Dataset_M4(Dataset):
-    def __init__(
-        self,
-        args,
-        root_path,
-        flag="pred",
-        size=None,
-        features="S",
-        data_path="ETTh1.csv",
-        target="OT",
-        scale=False,
-        inverse=False,
-        timeenc=0,
-        freq="15min",
-        seasonal_patterns="Yearly",
-    ) -> None:
-        # size [seq_len, label_len, pred_len]
-        # init
-        self.features = features
-        self.target = target
-        self.scale = scale
-        self.inverse = inverse
-        self.timeenc = timeenc
-        self.root_path = root_path
-
-        self.seq_len = size[0]
-        self.label_len = size[1]
-        self.pred_len = size[2]
-
-        self.seasonal_patterns = seasonal_patterns
-        self.history_size = M4Meta.history_size[seasonal_patterns]
-        self.window_sampling_limit = int(self.history_size * self.pred_len)
-        self.flag = flag
-
-        self.__read_data__()
-
-    def __read_data__(self):
-        # M4Dataset.initialize()
-        if self.flag == "train":
-            dataset = M4Dataset.load(training=True, dataset_file=self.root_path)
-        else:
-            dataset = M4Dataset.load(training=False, dataset_file=self.root_path)
-        training_values = np.array(
-            [v[~np.isnan(v)] for v in dataset.values[dataset.groups == self.seasonal_patterns]]
-        )  # split different frequencies
-        self.ids = np.array(list(dataset.ids[dataset.groups == self.seasonal_patterns]))
-        self.timeseries = list(training_values)
-
-    def __getitem__(self, index):
-        insample = np.zeros((self.seq_len, 1))
-        insample_mask = np.zeros((self.seq_len, 1))
-        outsample = np.zeros((self.pred_len + self.label_len, 1))
-        outsample_mask = np.zeros((self.pred_len + self.label_len, 1))  # m4 dataset
-
-        sampled_timeseries = self.timeseries[index]
-        cut_point = np.random.randint(
-            low=max(1, len(sampled_timeseries) - self.window_sampling_limit), high=len(sampled_timeseries), size=1
-        )[0]
-
-        insample_window = sampled_timeseries[max(0, cut_point - self.seq_len) : cut_point]
-        insample[-len(insample_window) :, 0] = insample_window
-        insample_mask[-len(insample_window) :, 0] = 1.0
-        outsample_window = sampled_timeseries[
-            max(0, cut_point - self.label_len) : min(len(sampled_timeseries), cut_point + self.pred_len)
-        ]
-        outsample[: len(outsample_window), 0] = outsample_window
-        outsample_mask[: len(outsample_window), 0] = 1.0
-        return insample, outsample, insample_mask, outsample_mask
-
-    def __len__(self) -> int:
-        return len(self.timeseries)
-
-    def inverse_transform(self, data):
-        return self.scaler.inverse_transform(data)
-
-    def last_insample_window(self):
-        """The last window of insample size of all timeseries.
-        This function does not support batching and does not reshuffle timeseries.
-
-        :return: Last insample window of all timeseries. Shape "timeseries, insample size"
-        """
-        insample = np.zeros((len(self.timeseries), self.seq_len))
-        insample_mask = np.zeros((len(self.timeseries), self.seq_len))
-        for i, ts in enumerate(self.timeseries):
-            ts_last_window = ts[-self.seq_len :]
-            insample[i, -len(ts) :] = ts_last_window
-            insample_mask[i, -len(ts) :] = 1.0
-        return insample, insample_mask
-
-
-class PSMSegLoader(Dataset):
-    def __init__(self, args, root_path, win_size, step=1, flag="train") -> None:
-        self.flag = flag
-        self.step = step
-        self.win_size = win_size
-        self.scaler = StandardScaler()
-        data = pd.read_csv(os.path.join(root_path, "train.csv"))
-        data = data.values[:, 1:]
-        data = np.nan_to_num(data)
-        self.scaler.fit(data)
-        data = self.scaler.transform(data)
-        test_data = pd.read_csv(os.path.join(root_path, "test.csv"))
-        test_data = test_data.values[:, 1:]
-        test_data = np.nan_to_num(test_data)
-        self.test = self.scaler.transform(test_data)
-        self.train = data
-        data_len = len(self.train)
-        self.val = self.train[(int)(data_len * 0.8) :]
-        self.test_labels = pd.read_csv(os.path.join(root_path, "test_label.csv")).values[:, 1:]
-        print("test:", self.test.shape)
-        print("train:", self.train.shape)
-
-    def __len__(self) -> int:
-        if self.flag == "train":
-            return (self.train.shape[0] - self.win_size) // self.step + 1
-        if self.flag == "val":
-            return (self.val.shape[0] - self.win_size) // self.step + 1
-        if self.flag == "test":
-            return (self.test.shape[0] - self.win_size) // self.step + 1
-        return (self.test.shape[0] - self.win_size) // self.win_size + 1
-
-    def __getitem__(self, index):
-        index = index * self.step
-        if self.flag == "train":
-            return np.float32(self.train[index : index + self.win_size]), np.float32(
-                self.test_labels[0 : self.win_size]
-            )
-        if self.flag == "val":
-            return np.float32(self.val[index : index + self.win_size]), np.float32(self.test_labels[0 : self.win_size])
-        if self.flag == "test":
-            return np.float32(self.test[index : index + self.win_size]), np.float32(
-                self.test_labels[index : index + self.win_size]
-            )
-        return np.float32(
-            self.test[index // self.step * self.win_size : index // self.step * self.win_size + self.win_size]
-        ), np.float32(
-            self.test_labels[index // self.step * self.win_size : index // self.step * self.win_size + self.win_size]
-        )
-
-
-class MSLSegLoader(Dataset):
-    def __init__(self, args, root_path, win_size, step=1, flag="train") -> None:
-        self.flag = flag
-        self.step = step
-        self.win_size = win_size
-        self.scaler = StandardScaler()
-        data = np.load(os.path.join(root_path, "MSL_train.npy"))
-        self.scaler.fit(data)
-        data = self.scaler.transform(data)
-        test_data = np.load(os.path.join(root_path, "MSL_test.npy"))
-        self.test = self.scaler.transform(test_data)
-        self.train = data
-        data_len = len(self.train)
-        self.val = self.train[(int)(data_len * 0.8) :]
-        self.test_labels = np.load(os.path.join(root_path, "MSL_test_label.npy"))
-        print("test:", self.test.shape)
-        print("train:", self.train.shape)
-
-    def __len__(self) -> int:
-        if self.flag == "train":
-            return (self.train.shape[0] - self.win_size) // self.step + 1
-        if self.flag == "val":
-            return (self.val.shape[0] - self.win_size) // self.step + 1
-        if self.flag == "test":
-            return (self.test.shape[0] - self.win_size) // self.step + 1
-        return (self.test.shape[0] - self.win_size) // self.win_size + 1
-
-    def __getitem__(self, index):
-        index = index * self.step
-        if self.flag == "train":
-            return np.float32(self.train[index : index + self.win_size]), np.float32(
-                self.test_labels[0 : self.win_size]
-            )
-        if self.flag == "val":
-            return np.float32(self.val[index : index + self.win_size]), np.float32(self.test_labels[0 : self.win_size])
-        if self.flag == "test":
-            return np.float32(self.test[index : index + self.win_size]), np.float32(
-                self.test_labels[index : index + self.win_size]
-            )
-        return np.float32(
-            self.test[index // self.step * self.win_size : index // self.step * self.win_size + self.win_size]
-        ), np.float32(
-            self.test_labels[index // self.step * self.win_size : index // self.step * self.win_size + self.win_size]
-        )
-
-
-class SMAPSegLoader(Dataset):
-    def __init__(self, args, root_path, win_size, step=1, flag="train") -> None:
-        self.flag = flag
-        self.step = step
-        self.win_size = win_size
-        self.scaler = StandardScaler()
-        data = np.load(os.path.join(root_path, "SMAP_train.npy"))
-        self.scaler.fit(data)
-        data = self.scaler.transform(data)
-        test_data = np.load(os.path.join(root_path, "SMAP_test.npy"))
-        self.test = self.scaler.transform(test_data)
-        self.train = data
-        data_len = len(self.train)
-        self.val = self.train[(int)(data_len * 0.8) :]
-        self.test_labels = np.load(os.path.join(root_path, "SMAP_test_label.npy"))
-        print("test:", self.test.shape)
-        print("train:", self.train.shape)
-
-    def __len__(self) -> int:
-
-        if self.flag == "train":
-            return (self.train.shape[0] - self.win_size) // self.step + 1
-        if self.flag == "val":
-            return (self.val.shape[0] - self.win_size) // self.step + 1
-        if self.flag == "test":
-            return (self.test.shape[0] - self.win_size) // self.step + 1
-        return (self.test.shape[0] - self.win_size) // self.win_size + 1
-
-    def __getitem__(self, index):
-        index = index * self.step
-        if self.flag == "train":
-            return np.float32(self.train[index : index + self.win_size]), np.float32(
-                self.test_labels[0 : self.win_size]
-            )
-        if self.flag == "val":
-            return np.float32(self.val[index : index + self.win_size]), np.float32(self.test_labels[0 : self.win_size])
-        if self.flag == "test":
-            return np.float32(self.test[index : index + self.win_size]), np.float32(
-                self.test_labels[index : index + self.win_size]
-            )
-        return np.float32(
-            self.test[index // self.step * self.win_size : index // self.step * self.win_size + self.win_size]
-        ), np.float32(
-            self.test_labels[index // self.step * self.win_size : index // self.step * self.win_size + self.win_size]
-        )
-
-
-class SMDSegLoader(Dataset):
-    def __init__(self, args, root_path, win_size, step=100, flag="train") -> None:
-        self.flag = flag
-        self.step = step
-        self.win_size = win_size
-        self.scaler = StandardScaler()
-        data = np.load(os.path.join(root_path, "SMD_train.npy"))
-        self.scaler.fit(data)
-        data = self.scaler.transform(data)
-        test_data = np.load(os.path.join(root_path, "SMD_test.npy"))
-        self.test = self.scaler.transform(test_data)
-        self.train = data
-        data_len = len(self.train)
-        self.val = self.train[(int)(data_len * 0.8) :]
-        self.test_labels = np.load(os.path.join(root_path, "SMD_test_label.npy"))
-
-    def __len__(self) -> int:
-        if self.flag == "train":
-            return (self.train.shape[0] - self.win_size) // self.step + 1
-        if self.flag == "val":
-            return (self.val.shape[0] - self.win_size) // self.step + 1
-        if self.flag == "test":
-            return (self.test.shape[0] - self.win_size) // self.step + 1
-        return (self.test.shape[0] - self.win_size) // self.win_size + 1
-
-    def __getitem__(self, index):
-        index = index * self.step
-        if self.flag == "train":
-            return np.float32(self.train[index : index + self.win_size]), np.float32(
-                self.test_labels[0 : self.win_size]
-            )
-        if self.flag == "val":
-            return np.float32(self.val[index : index + self.win_size]), np.float32(self.test_labels[0 : self.win_size])
-        if self.flag == "test":
-            return np.float32(self.test[index : index + self.win_size]), np.float32(
-                self.test_labels[index : index + self.win_size]
-            )
-        return np.float32(
-            self.test[index // self.step * self.win_size : index // self.step * self.win_size + self.win_size]
-        ), np.float32(
-            self.test_labels[index // self.step * self.win_size : index // self.step * self.win_size + self.win_size]
-        )
-
-
-class SWATSegLoader(Dataset):
-    def __init__(self, args, root_path, win_size, step=1, flag="train") -> None:
-        self.flag = flag
-        self.step = step
-        self.win_size = win_size
-        self.scaler = StandardScaler()
-
-        train_data = pd.read_csv(os.path.join(root_path, "swat_train2.csv"))
-        test_data = pd.read_csv(os.path.join(root_path, "swat2.csv"))
-        labels = test_data.values[:, -1:]
-        train_data = train_data.values[:, :-1]
-        test_data = test_data.values[:, :-1]
-
-        self.scaler.fit(train_data)
-        train_data = self.scaler.transform(train_data)
-        test_data = self.scaler.transform(test_data)
-        self.train = train_data
-        self.test = test_data
-        data_len = len(self.train)
-        self.val = self.train[(int)(data_len * 0.8) :]
-        self.test_labels = labels
-        print("test:", self.test.shape)
-        print("train:", self.train.shape)
-
-    def __len__(self) -> int:
-        """Number of images in the object dataset."""
-        if self.flag == "train":
-            return (self.train.shape[0] - self.win_size) // self.step + 1
-        if self.flag == "val":
-            return (self.val.shape[0] - self.win_size) // self.step + 1
-        if self.flag == "test":
-            return (self.test.shape[0] - self.win_size) // self.step + 1
-        return (self.test.shape[0] - self.win_size) // self.win_size + 1
-
-    def __getitem__(self, index):
-        index = index * self.step
-        if self.flag == "train":
-            return np.float32(self.train[index : index + self.win_size]), np.float32(
-                self.test_labels[0 : self.win_size]
-            )
-        if self.flag == "val":
-            return np.float32(self.val[index : index + self.win_size]), np.float32(self.test_labels[0 : self.win_size])
-        if self.flag == "test":
-            return np.float32(self.test[index : index + self.win_size]), np.float32(
-                self.test_labels[index : index + self.win_size]
-            )
-        return np.float32(
-            self.test[index // self.step * self.win_size : index // self.step * self.win_size + self.win_size]
-        ), np.float32(
-            self.test_labels[index // self.step * self.win_size : index // self.step * self.win_size + self.win_size]
-        )
-
-
-
-
-
-class Dataset_Diff(Dataset):
+class Dataset_Diff(BaseForecastDataset):
     _supports_multicol = True  # default
+
     def __init__(
         self,
         args,
@@ -776,30 +179,10 @@ class Dataset_Diff(Dataset):
         timeenc=0,
         freq="h",
     ) -> None:
-        # size [seq_len, label_len, pred_len]
-        self.args = args
-        # info
         if size is None:
             # TODO nicht size nehmen sonder args.seq_len etc.?
-            self.seq_len = 144
-            self.label_len = 48  # TODO???
-            self.pred_len = 48
-        else:
-            self.seq_len = size[0]
-            self.label_len = size[1]
-            self.pred_len = size[2]
-        # init
-        assert flag in ["train", "test", "val"]
-        type_map = {"train": 0, "val": 1, "test": 2}
-        self.set_type = type_map[flag]
-
-        self.features = features
-        self.target = target
-        self.timeenc = timeenc
-        self.freq = freq
-
-        self.root_path = root_path
-        self.data_path = data_path
+            size = (144, 48, 48)
+        super().__init__(args, root_path, data_path, flag, size, features, target, timeenc, freq)
 
         self.date_col = args.date_col
         self.diff = args.diff
@@ -816,7 +199,6 @@ class Dataset_Diff(Dataset):
 
         self.__read_data__()
 
-
     def __read_data__(self):
         self.scaler = StandardScaler()
         if self.is_npy:
@@ -824,32 +206,34 @@ class Dataset_Diff(Dataset):
             df_raw = pd.DataFrame(data)
         elif self.data_path.endswith(".csv"):
             df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path), parse_dates=[self.date_col])
+        else:
+            msg = f"Unsupported file format: {self.data_path}"
+            raise ValueError(msg)
 
         # fill missing values #TODO this is only for the LFU
-        # max_fill = 200
-        # na_count = df_raw.isna().sum(axis=0)
-        # mask = (
-        #     df_raw.columns.str.contains("NEW")
-        #     | df_raw.columns.str.contains("NVh")
-        #     | (df_raw.columns.str.startswith("N") & df_raw.columns.str.endswith("_mm"))
-        # )
+        max_fill = 200
+        na_count = df_raw.isna().sum(axis=0)
+        mask = (
+            df_raw.columns.str.contains("NEW")
+            | df_raw.columns.str.contains("NVh")
+            | (df_raw.columns.str.startswith("N") & df_raw.columns.str.endswith("_mm"))
+        )
 
-        # prec_cols = list(na_count[mask][na_count[mask] > 0].index)
-        # if len(prec_cols) > 0:
-        #     df_raw.loc[:, mask] = df_raw.loc[:, mask].fillna(0)
+        prec_cols = list(na_count[mask][na_count[mask] > 0].index)
+        if len(prec_cols) > 0:
+            df_raw.loc[:, mask] = df_raw.loc[:, mask].fillna(0)
 
-        # # interpolate data in all other columns
-        # df_raw = df_raw.interpolate(limit=max_fill, limit_direction="both")
+        # interpolate data in all other columns
+        df_raw = df_raw.interpolate(limit=max_fill, limit_direction="both")
 
-        # if df_raw.isna().sum().sum() > 0:
-        #     msg = (
-        #         f"Some columns were missing more than {max_fill} continuous values, either raise the limit or fill values manually."
-        #         f"{df_raw.isna().sum().sum()} still missing,"
-        #     )
-        #     raise ValueError(msg)
+        if df_raw.isna().sum().sum() > 0:
+            msg = (
+                f"Some columns were missing more than {max_fill} continuous values, either raise the limit or fill values manually."
+                f"{df_raw.isna().sum().sum()} still missing,"
+            )
+            raise ValueError(msg)
 
-
-        #df_raw.columns: ['date', ...(other features), target feature]
+        # df_raw.columns: ['date', ...(other features), target feature]
         if not self.is_npy:
             df_raw.rename(columns={self.date_col: "date"}, inplace=True)
 
@@ -862,7 +246,7 @@ class Dataset_Diff(Dataset):
                 border2s = [num_train, num_train + num_vali, len(df_raw)]
             else:
                 # TODO assert compat boarders_start + dataset
-                assert self.args.data_path in ["ETTh1.csv", "ETTh2.csv", "ETTm1.csv", "ETTm2.csv"], (
+                assert self.args.data_path in {"ETTh1.csv", "ETTh2.csv", "ETTm1.csv", "ETTm2.csv"}, (
                     "This option should only be used in combination with the ETT datasets"
                 )
                 border1s = [
@@ -871,7 +255,7 @@ class Dataset_Diff(Dataset):
                     self.args.borders_start[2] - self.seq_len,
                 ]
                 border2s = self.args.borders_end
-        except (KeyError,AttributeError):
+        except (KeyError, AttributeError):
             num_train = int(len(df_raw) * 0.7)
             num_test = int(len(df_raw) * 0.2)
             num_vali = len(df_raw) - num_train - num_test
@@ -882,11 +266,11 @@ class Dataset_Diff(Dataset):
         border2 = border2s[self.set_type]
 
         if self.args.diff:
-            if self.features == "M":  # TODO other options
+            if self.features == "M":
                 cols = list(df_raw.columns)
                 if not self.is_npy:
                     cols.remove("date")
-            elif self.features in {"MS", "S"}:
+            else:  # "MS" or "S", validated in __init__
                 cols = [self.target]
 
             df_diff = df_raw[cols].diff()
@@ -942,7 +326,7 @@ class Dataset_Diff(Dataset):
 
         s_begin = index
         if self.is_npy:
-            #s_begin = index % n_timepoint  # select start timestamp
+            # s_begin = index % n_timepoint  # select start timestamp
             s_begin = self.stride * s_begin
 
         s_end = s_begin + self.seq_len
@@ -956,10 +340,8 @@ class Dataset_Diff(Dataset):
             seq_x_mark = self.data_stamp[s_begin:s_end]
             seq_y_mark = self.data_stamp[r_begin:r_end]
         else:
-
             seq_x_mark = torch.zeros((seq_x.shape[0], self.num_time_features))
             seq_y_mark = torch.zeros((seq_x.shape[0], self.num_time_features))
-
 
         if self.diff:
             if self.features == "M":
@@ -981,7 +363,7 @@ class Dataset_Diff(Dataset):
         return self.index[self.seq_len + -1 : -self.pred_len]
 
 
-class Dataset_MW(Dataset):
+class Dataset_MW(BaseForecastDataset):
     def __init__(
         self,
         args,
@@ -994,21 +376,10 @@ class Dataset_MW(Dataset):
         timeenc=0,
         freq="D",
     ) -> None:
-        # size [seq_len, label_len, pred_len]
-        self.args = args
-        # info
         if size is None:
-            self.seq_len = 144
-            self.label_len = 48
-            self.pred_len = 48
-        else:
-            self.seq_len = size[0]
-            self.label_len = size[1]
-            self.pred_len = size[2]
-        # init
-        assert flag in ["train", "val", "test"]
-        type_map = {"train": 0, "val": 1, "test": 2}
-        self.set_type = type_map[flag]
+            size = (144, 48, 48)
+        super().__init__(args, root_path, data_path, flag, size, features, target, timeenc, freq)
+
         self.train_end = "2007-12-31"
         self.val_end = "2012-12-31"
 
@@ -1017,21 +388,15 @@ class Dataset_MW(Dataset):
         else:
             self.dynamic_scaler = args.dynamic_scaler
 
-        self.features = features
-        self.target = target
-        self.timeenc = timeenc
-        self.freq = freq
-
-        self.root_path = root_path
-        self.data_path = data_path  # folder path
         self.static_path = os.path.join(root_path, "static/static_features_MW_1toMW_3207.csv")
 
         self.diff = getattr(args, "diff", False)
         self.__read_data__()
 
         self.scaler = StandardScaler()
-        self.scaler.mean_ = np.concat([self.dynamic_scaler.mean_, self.scaler_static.mean_])
-        self.scaler.scale_ = np.concat([self.dynamic_scaler.scale_, self.scaler_static.scale_])
+        # mean_/scale_ are typed Optional but are always set once the scalers are fitted.
+        self.scaler.mean_ = np.concat([self.dynamic_scaler.mean_, self.scaler_static.mean_])  # pyright: ignore[reportArgumentType, reportCallIssue]
+        self.scaler.scale_ = np.concat([self.dynamic_scaler.scale_, self.scaler_static.scale_])  # pyright: ignore[reportArgumentType,reportCallIssue]
 
     def __read_data__(self):
         import glob
@@ -1098,7 +463,7 @@ class Dataset_MW(Dataset):
         self.encoders = {}
         for col in categorical_cols:
             le = LabelEncoder()
-            static_df[col] = le.fit_transform(static_df[col])
+            static_df[col] = le.fit_transform(static_df[col])  # pyright: ignore[reportArgumentType, reportCallIssue]
             self.encoders[col] = le
 
         static_train = static_df.loc[self.train_mws]
@@ -1182,11 +547,13 @@ class Dataset_MW(Dataset):
 
     def __getitem__(self, index):
         # Find the MW and the offset
+        mw_id, i = None, None
         for j in range(len(self.cutoffs) - 1):
             if index < self.cutoffs[j + 1]:
                 mw_id = self.mw_list[j]
                 i = index - self.cutoffs[j]
                 break
+
         data = self.well_data[mw_id]
 
         s_begin = i

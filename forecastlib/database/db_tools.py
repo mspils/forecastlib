@@ -20,13 +20,9 @@ from dotenv import load_dotenv
 from pandas.tseries.offsets import DateOffset
 from sqlalchemy import between, bindparam, create_engine, select, update
 from sqlalchemy.exc import IntegrityError
-
-# from sqlalchemy.dialects.oracle import FLOAT, TIMESTAMP, VARCHAR2
 from sqlalchemy.orm import sessionmaker
 from torch.utils.data import DataLoader, Dataset
 
-# import forecastlib.utils.helpers as hp
-# from forecastlib.utils.utility import scale_standard
 from forecastlib.database.orm_classes import (
     Base,
     InputForecastsLong,
@@ -39,7 +35,6 @@ from forecastlib.database.orm_classes import (
 from forecastlib.models.LightningWrapper import CustomLightningModule, EnsembleModule, UncertaintyLightningModule
 from forecastlib.utils.timefeatures import get_data_stamp
 
-# from data_tools.datasets import TimeSeriesDataSet
 # pylint: disable=unsupported-assignment-operation
 # pylint: disable=unsubscriptable-object
 # pylint: disable=reportAttributeAccessIssue

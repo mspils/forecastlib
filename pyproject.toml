@@ -46,9 +46,10 @@ wrappers = [
 ]
 # The Mamba model (forecastlib.models.Mamba) needs a CUDA build of mamba-ssm.
 # Installed separately on purpose; MambaSimple works without it.
-mamba = [
-    "mamba-ssm>=2.0.0",
-]
+#mamba = [
+#    "mamba-ssm>=2.0.0",
+#]
+
 dev = [
     "deptry>=0.24.0",
     "poethepoet>=0.42.0",

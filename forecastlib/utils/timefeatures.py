@@ -224,7 +224,7 @@ class WeekOfYear(TimeFeature):
         return (index.isocalendar().week - 1) / 52.0 - 0.5
 
 
-FREQ_MAP = {"h": 4, "t": 5, "s": 6, "m": 1, "a": 1, "w": 2, "W":2, "d": 3, "D": 3, "b": 3}
+FREQ_MAP = {"h": 4, "t": 5, "s": 6, "m": 1, "a": 1, "w": 2, "W": 2, "d": 3, "D": 3, "b": 3}
 
 
 def time_features_from_frequency_str(freq_str: str) -> list[TimeFeature]:
