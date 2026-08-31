@@ -2,6 +2,7 @@
 
 import lightning.pytorch as pl
 import torch
+from lightning.pytorch.accelerators import CPUAccelerator
 from lightning.pytorch.callbacks import Callback, TQDMProgressBar
 from scipy import stats
 from sklearn.preprocessing import StandardScaler
@@ -415,7 +416,9 @@ class StepWiseMetricsCallbackWaterlevel(Callback):
             # default_root_dir=self.log_dir,
             logger=False,
             accelerator=trainer.accelerator,
-            devices=trainer.device_ids,
+            # CPUAccelerator rejects a device-id list; it needs an int count.
+            # On GPU keep device_ids so we stay on the originally selected GPU.
+            devices=trainer.num_devices if isinstance(trainer.accelerator, CPUAccelerator) else trainer.device_ids,
             callbacks=[TQDMProgressBar(refresh_rate=20)],
         )
 
@@ -561,7 +564,9 @@ class GemsGerCallback(Callback):
             # default_root_dir=self.log_dir,
             logger=False,
             accelerator=trainer.accelerator,
-            devices=trainer.device_ids,
+            # CPUAccelerator rejects a device-id list; it needs an int count.
+            # On GPU keep device_ids so we stay on the originally selected GPU.
+            devices=trainer.num_devices if isinstance(trainer.accelerator, CPUAccelerator) else trainer.device_ids,
             callbacks=[TQDMProgressBar(refresh_rate=20)],
         )
 
@@ -660,7 +665,9 @@ class StepWiseMetricsCallback(Callback):
             # default_root_dir=self.log_dir,
             logger=False,
             accelerator=trainer.accelerator,
-            devices=trainer.device_ids,
+            # CPUAccelerator rejects a device-id list; it needs an int count.
+            # On GPU keep device_ids so we stay on the originally selected GPU.
+            devices=trainer.num_devices if isinstance(trainer.accelerator, CPUAccelerator) else trainer.device_ids,
             callbacks=[TQDMProgressBar(refresh_rate=20)],
         )
 
