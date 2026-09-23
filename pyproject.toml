@@ -83,6 +83,7 @@ lint.ignore = [
     "T201",
     "ANN401",
 ]
+lint.per-file-ignores."tests/**/*.py" = ["S101", "D", "ANN", "INP001", "PLR2004"]
 include = ["forecastlib/**/*.py", "tests/**/*.py"]
 # Upstream model/layer implementations are kept close to their papers; don't lint them.
 extend-exclude = [

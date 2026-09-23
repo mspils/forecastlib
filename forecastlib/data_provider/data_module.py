@@ -7,14 +7,12 @@ from torch.utils.data import DataLoader
 
 from forecastlib.data_provider.data_loader import (
     Dataset_Custom,
-    Dataset_Diff,
     Dataset_MW,
 )
 from forecastlib.utils.tools import ConfigTracker, load_model_settings
 
 data_dict = {
     "custom": Dataset_Custom,
-    "Diff": Dataset_Diff,
     "MW": Dataset_MW,
 }
 

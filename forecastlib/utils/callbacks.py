@@ -493,7 +493,6 @@ class StepWiseMetricsCallbackWaterlevel(Callback):
 
         if trainer.datamodule.hparams.get("features") == "M":
             print("Warning, pretty much untested")
-            # if isinstance(trainer.datamodule.train_set,Dataset_Diff):
             if getattr(trainer.datamodule.train_set, "_supports_multicol", False):
                 cols = trainer.datamodule.train_set.data_x_raw.columns
                 if trainer.datamodule.hparams.get("diff"):
