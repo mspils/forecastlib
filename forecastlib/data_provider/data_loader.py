@@ -93,6 +93,8 @@ class Dataset_Custom(BaseForecastDataset):
     def __read_data__(self):
         self.scaler = StandardScaler()
         df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
+        date_col = getattr(self.args, "date_col", "date")
+        df_raw = df_raw.rename(columns={date_col: "date"})
 
         """
         df_raw.columns: ['date', ...(other features), target feature]
