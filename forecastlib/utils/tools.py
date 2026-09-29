@@ -1,6 +1,7 @@
 """All kind of handy little tools, mostly for handling configs."""
 
 import contextlib
+import inspect
 import pickle
 from argparse import Namespace
 from itertools import product
@@ -224,3 +225,29 @@ def load_model_settings(model_dir: Path, device: str | torch.device = None) -> C
             with contextlib.suppress(TypeError):
                 yaml_data["device"] = pickle.loads(yaml_data["device"])
     return ConfigTracker(yaml_data)
+
+
+def resolve_class(name_or_class: str | type, registry: dict[str, type], arg_name: str) -> type:
+    """Return the class for a registry name, or the class itself if one was passed."""
+    if isinstance(name_or_class, str):
+        if name_or_class not in registry:
+            msg = f"Unknown {arg_name} {name_or_class!r}, choose one of {list(registry)} or pass a class"
+            raise KeyError(msg)
+        return registry[name_or_class]
+    if inspect.isclass(name_or_class):
+        return name_or_class
+    msg = f"{arg_name} must be either a registry name string or a class"
+    raise TypeError(msg)
+
+
+def class_name(name_or_class: str | type, registry: dict[str, type]) -> str:
+    """Return the registry name for a class, falling back to its __name__. Strings are returned as-is.
+
+    Used to store a class argument in hparams, which only hold serialisable values.
+    """
+    if isinstance(name_or_class, str):
+        return name_or_class
+    for name, cls in registry.items():
+        if cls is name_or_class:
+            return name
+    return name_or_class.__name__

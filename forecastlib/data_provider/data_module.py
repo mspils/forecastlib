@@ -1,4 +1,3 @@
-import inspect
 import pickle
 from functools import partial
 
@@ -9,7 +8,7 @@ from forecastlib.data_provider.data_loader import (
     Dataset_Custom,
     Dataset_MW,
 )
-from forecastlib.utils.tools import ConfigTracker, load_model_settings
+from forecastlib.utils.tools import ConfigTracker, class_name, load_model_settings, resolve_class
 
 data_dict = {
     "custom": Dataset_Custom,
@@ -18,33 +17,12 @@ data_dict = {
 
 
 class CustomDataModule(pl.LightningDataModule):
-    @staticmethod
-    def _get_dataset_name(dataset_arg):
-        if isinstance(dataset_arg, str):
-            return dataset_arg
-
-        if inspect.isclass(dataset_arg):
-            for name, cls in data_dict.items():
-                if cls is dataset_arg:
-                    return name
-            return dataset_arg.__name__
-
-        raise TypeError("args.data must be either a dataset name string or a dataset class")
-
-    @staticmethod
-    def _resolve_dataset_class(dataset_arg):
-        if isinstance(dataset_arg, str):
-            return data_dict[dataset_arg]
-        if inspect.isclass(dataset_arg):
-            return dataset_arg
-        raise TypeError("args.data must be either a dataset name string or a dataset class")
-
     def __init__(self, args) -> None:
         super().__init__()
         self.args = ConfigTracker(args)
 
-        self.Dataset_class = self._resolve_dataset_class(self.args.data)
-        self.data_name = self._get_dataset_name(self.args.data)
+        self.Dataset_class = resolve_class(self.args.data, data_dict, "args.data")
+        self.data_name = class_name(self.args.data, data_dict)
         self.args.timeenc = 0 if self.args.embed != "timeF" else 1
 
         self.num_workers = self.args.num_workers

@@ -45,44 +45,48 @@ from forecastlib.models import (
 )
 from forecastlib.utils.quantile import QuantileLoss, median_index, pinball_loss, resolve_quantiles
 from forecastlib.utils.timefeatures import FREQ_MAP, time_features_from_frequency_str
-from forecastlib.utils.tools import ConfigTracker, load_model_settings
+from forecastlib.utils.tools import ConfigTracker, class_name, load_model_settings, resolve_class
+
+
+# Name -> model class. args.model may be one of these names or any nn.Module subclass taking (args).
+model_dict = {
+    "TimesNet": TimesNet.Model,
+    "Autoformer": Autoformer.Model,
+    "Transformer": Transformer.Model,
+    "Nonstationary_Transformer": Nonstationary_Transformer.Model,
+    "DLinear": DLinear.Model,
+    "FEDformer": FEDformer.Model,
+    "Informer": Informer.Model,
+    "LightTS": LightTS.Model,
+    "Reformer": Reformer.Model,
+    "ETSformer": ETSformer.Model,
+    "PatchTST": PatchTST.Model,
+    "Pyraformer": Pyraformer.Model,
+    "MICN": MICN.Model,
+    "Crossformer": Crossformer.Model,
+    "FiLM": FiLM.Model,
+    "iTransformer": iTransformer.Model,
+    "TiDE": TiDE.Model,
+    "FreTS": FreTS.Model,
+    "MambaSimple": MambaSimple.Model,
+    "TimeMixer": TimeMixer.Model,
+    "TSMixer": TSMixer.Model,
+    "SegRNN": SegRNN.Model,
+    "TemporalFusionTransformer": TemporalFusionTransformer.Model,
+    "SCINet": SCINet.Model,
+    "PAttn": PAttn.Model,
+    "TimeXer": TimeXer.Model,
+    "WPMixer": WPMixer.Model,
+    "MultiPatchFormer": MultiPatchFormer.Model,
+    "LSTM": LSTM.Model,
+}
+uncertain_model_dict = {"LSTM_uncertain": LSTM_uncertain.Model}
 
 
 class CustomLightningModule(pl.LightningModule):
     def __init__(self, args):
         super().__init__()
         self.args = args
-        self.model_dict = {
-            "TimesNet": TimesNet,
-            "Autoformer": Autoformer,
-            "Transformer": Transformer,
-            "Nonstationary_Transformer": Nonstationary_Transformer,
-            "DLinear": DLinear,
-            "FEDformer": FEDformer,
-            "Informer": Informer,
-            "LightTS": LightTS,
-            "Reformer": Reformer,
-            "ETSformer": ETSformer,
-            "PatchTST": PatchTST,
-            "Pyraformer": Pyraformer,
-            "MICN": MICN,
-            "Crossformer": Crossformer,
-            "FiLM": FiLM,
-            "iTransformer": iTransformer,
-            "TiDE": TiDE,
-            "FreTS": FreTS,
-            "MambaSimple": MambaSimple,
-            "TimeMixer": TimeMixer,
-            "TSMixer": TSMixer,
-            "SegRNN": SegRNN,
-            "TemporalFusionTransformer": TemporalFusionTransformer,
-            "SCINet": SCINet,
-            "PAttn": PAttn,
-            "TimeXer": TimeXer,
-            "WPMixer": WPMixer,
-            "MultiPatchFormer": MultiPatchFormer,
-            "LSTM": LSTM,
-        }
 
         # Loss registry: name -> callable(pred, true) -> scalar. "pinball" needs
         # its quantile levels bound before it fits that shape; see below.
@@ -92,7 +96,8 @@ class CustomLightningModule(pl.LightningModule):
         self.features = self.args.features
         self.model_id = self.args.model_id
         self.scaler = args.scaler  # This one we don't want to track, i think. Because it's in a pickled represantation in the data_moduls hparams
-        self.Model_class = self.model_dict[self.args.model].Model
+        self.Model_class = resolve_class(self.args.model, model_dict, "args.model")
+        self.model_name = class_name(self.args.model, model_dict)
         self.model = self.Model_class(self.args).float()
         self.criterion = self.loss_dict[self.args.loss]
 
@@ -107,7 +112,7 @@ class CustomLightningModule(pl.LightningModule):
             if model_n_quantiles != len(self.quantiles):
                 raise ValueError(
                     f"loss={self.args.loss!r} asks for {len(self.quantiles)} quantiles {self.quantiles}, but "
-                    f"{self.args.model} exposes n_quantiles={model_n_quantiles}. That model has no quantile "
+                    f"{self.model_name} exposes n_quantiles={model_n_quantiles}. That model has no quantile "
                     f"head; use a point loss (e.g. MSE) or a model that supports quantiles."
                 )
             # Bind the levels so the call stays criterion(outputs, batch_y).
@@ -178,6 +183,7 @@ class CustomLightningModule(pl.LightningModule):
         )  # This assures that parameters that aren't accessed in the __init__ are still available as a hparam
 
         temp_hparams = {k: self.args[k] for k in self.args.accessed_attrs}
+        temp_hparams["model"] = self.model_name  # args.model may be a class, which can't go into hparams.yaml
 
         try:
             temp_hparams = temp_hparams | {"patience": args.patience, "device": pickle.dumps(args.device)}
@@ -190,10 +196,12 @@ class CustomLightningModule(pl.LightningModule):
         self.save_hyperparameters(temp_hparams, ignore=["scaler", "device"])
 
     @classmethod
-    def from_disk(cls, model_dir, device=None):
+    def from_disk(cls, model_dir, device=None, model_class=None):
+        """Load a trained model. Pass model_class if it was trained with a class that isn't in model_dict."""
         if isinstance(model_dir, str):
             model_dir = Path(model_dir)
         args = load_model_settings(model_dir, device)
+        args.model = model_class or args.model
         checkpoint_path = next((model_dir / "checkpoints").iterdir())
         # model = CustomLightningModule.load_from_checkpoint(checkpoint_path,args=args)
         #model = cls.load_from_checkpoint(checkpoint_path, args=args)
@@ -202,9 +210,10 @@ class CustomLightningModule(pl.LightningModule):
         return model
 
     @classmethod
-    def from_db(cls, yaml_clob, model_blob, device=None):
+    def from_db(cls, yaml_clob, model_blob, device=None, model_class=None):
         yaml_data = yaml.load(yaml_clob, Loader=yaml.FullLoader)
         yaml_data["scaler"] = pickle.loads(yaml_data["scaler"])
+        yaml_data["model"] = model_class or yaml_data["model"]
 
         if "device" in yaml_data:
             yaml_data["device"] = pickle.loads(yaml_data["device"])
@@ -388,9 +397,6 @@ class CustomLightningModule(pl.LightningModule):
 class UncertaintyLightningModule(pl.LightningModule):  # TODO an Timeserieslibrary anpassen
     def __init__(self, args):
         super().__init__()
-        self.model_dict = {
-            "LSTM_uncertain": LSTM_uncertain,
-        }
         self.loss_dict = {"nll": F.gaussian_nll_loss}
 
         self.args = ConfigTracker(args)
@@ -399,7 +405,8 @@ class UncertaintyLightningModule(pl.LightningModule):  # TODO an Timeserieslibra
         self.features = self.args.features
         self.model_id = self.args.model_id
         self.scaler = args.scaler  # This one we don't want to track, i think. Because it's in a pickled represantation in the data_moduls hparams
-        self.Model_class = self.model_dict[self.args.model].Model
+        self.Model_class = resolve_class(self.args.model, uncertain_model_dict, "args.model")
+        self.model_name = class_name(self.args.model, uncertain_model_dict)
         self.model = self.Model_class(self.args).float()
         self.criterion = self.loss_dict[self.args.loss]
         # self.f_dim = -1 if self.args.features == 'MS' else 0
@@ -439,25 +446,29 @@ class UncertaintyLightningModule(pl.LightningModule):  # TODO an Timeserieslibra
         )  # This assures that parameters that aren't accessed in the __init__ are still available as a hparam
 
         temp_hparams = {k: self.args[k] for k in self.args.accessed_attrs}
+        temp_hparams["model"] = self.model_name  # args.model may be a class, which can't go into hparams.yaml
 
         temp_hparams = temp_hparams | {"patience": args.patience}
 
         self.save_hyperparameters(temp_hparams, ignore="scaler")
 
     @classmethod
-    def from_disk(cls, model_dir):
+    def from_disk(cls, model_dir, model_class=None):
+        """Load a trained model. Pass model_class if it was trained with a class that isn't in uncertain_model_dict."""
         if isinstance(model_dir, str):
             model_dir = Path(model_dir)
         args = load_model_settings(model_dir)
+        args.model = model_class or args.model
         checkpoint_path = next((model_dir / "checkpoints").iterdir())
         # model = CustomLightningModule.load_from_checkpoint(checkpoint_path,args=args)
         model = cls.load_from_checkpoint(checkpoint_path, args=args)
         return model
 
     @classmethod
-    def from_db(cls, yaml_clob, model_blob):
+    def from_db(cls, yaml_clob, model_blob, model_class=None):
         yaml_data = yaml.load(yaml_clob, Loader=yaml.FullLoader)
         yaml_data["scaler"] = pickle.loads(yaml_data["scaler"])
+        yaml_data["model"] = model_class or yaml_data["model"]
         yaml_data = ConfigTracker(yaml_data)
         with io.BytesIO(model_blob) as checkpoint_stream:
             model = cls.load_from_checkpoint(checkpoint_stream, args=yaml_data)
