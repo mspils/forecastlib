@@ -423,11 +423,11 @@ class StepWiseMetricsCallbackWaterlevel(Callback):
         )
 
         if isinstance(pl_module, CustomLightningModule):
-            model = CustomLightningModule.from_disk(trainer.log_dir)
+            model = CustomLightningModule.from_disk(trainer.log_dir, model_class=pl_module.Model_class)
         elif isinstance(pl_module, EnsembleModule):
             model = EnsembleModule.from_disk(trainer.log_dir, pl_module.model_list)
         elif isinstance(pl_module, UncertaintyLightningModule):
-            model = UncertaintyLightningModule.from_disk(trainer.log_dir)
+            model = UncertaintyLightningModule.from_disk(trainer.log_dir, model_class=pl_module.Model_class)
         else:
             msg = f"model is neither CustomLightningModule nor EnsemleModule, but {type(pl_module)}"
             raise ValueError(msg)
@@ -570,11 +570,11 @@ class GemsGerCallback(Callback):
         )
 
         if isinstance(pl_module, CustomLightningModule):
-            model = CustomLightningModule.from_disk(trainer.log_dir)
+            model = CustomLightningModule.from_disk(trainer.log_dir, model_class=pl_module.Model_class)
         elif isinstance(pl_module, EnsembleModule):
             model = EnsembleModule.from_disk(trainer.log_dir, pl_module.model_list)
         elif isinstance(pl_module, UncertaintyLightningModule):
-            model = UncertaintyLightningModule.from_disk(trainer.log_dir)
+            model = UncertaintyLightningModule.from_disk(trainer.log_dir, model_class=pl_module.Model_class)
         else:
             msg = f"model is neither CustomLightningModule nor EnsemleModule, but {type(pl_module)}"
             raise ValueError(msg)
@@ -670,7 +670,7 @@ class StepWiseMetricsCallback(Callback):
             callbacks=[TQDMProgressBar(refresh_rate=20)],
         )
 
-        model = CustomLightningModule.from_disk(trainer.log_dir)
+        model = CustomLightningModule.from_disk(trainer.log_dir, model_class=getattr(pl_module, "Model_class", None))
         model.eval()
         metric_dict = {}
         dataloaders = {"train": train_loader, "val": val_loader, "test": test_loader}
