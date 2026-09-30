@@ -39,6 +39,9 @@ class CustomDataModule(pl.LightningDataModule):
             "batch_size": self.args.batch_size,
             "scaler": pickle.dumps(self.scaler),
         }
+        if self.known_scaler is not None:
+            # Needed by inference code to scale forecast values of the known covariates the same way.
+            temp_hparams["known_scaler"] = pickle.dumps(self.known_scaler)
         self.save_hyperparameters(temp_hparams, logger=False)
         self.save_hyperparameters(
             {k: temp_hparams[k] for k in ["batch_size", "data_path", "target"]}
@@ -81,6 +84,7 @@ class CustomDataModule(pl.LightningDataModule):
             self.val_set = data_set_template(flag="val", args=args)
             self.test_set = data_set_template(flag="test", args=args)
             self.scaler = self.train_set.scaler
+            self.known_scaler = getattr(self.train_set, "known_scaler", None)
 
     def train_dataloader(self, num_workers=None, **kwargs) -> DataLoader:
         num_workers = num_workers or self.num_workers
@@ -118,6 +122,21 @@ class CustomDataModule(pl.LightningDataModule):
         raw = getattr(self.train_set, "data_x_raw", None)
         return list(raw) if raw is not None else None
 
+    def _infer_covariate_layout(self, args: ConfigTracker, num_cols: int) -> None:
+        """Set the known/observed/static variable layout used by the TFT."""
+        # Known covariates (Dataset_Custom known_cols) are appended to the marks, not the data columns.
+        # Set only when used, so configs without known_cols keep their hparams unchanged.
+        known_cols = getattr(args, "known_cols", None) or []
+        if known_cols:
+            args.known_len_extra = len(known_cols)
+        # Dataset_Custom has no static columns, all data columns are observed. Needed by the TFT, which otherwise
+        # looks the layout up by dataset name. Other datasets (e.g. MW) keep that lookup.
+        if issubclass(self.Dataset_class, Dataset_Custom):
+            if getattr(args, "observed_pos", None) is None:
+                args.observed_pos = list(range(num_cols))
+            if getattr(args, "static_pos", None) is None:
+                args.static_pos = []
+
     def infer_args(self) -> ConfigTracker:
         """Populate self.args with dataset characteristics (sizes, scaler, feature indices)."""
         args = self.args
@@ -126,6 +145,7 @@ class CustomDataModule(pl.LightningDataModule):
         args.dec_in = num_cols
         args.c_out = num_cols
         args.scaler = self.scaler
+        self._infer_covariate_layout(args, num_cols)
 
         args.diff = getattr(args, "diff", False)
         args.diff_comb = getattr(args, "diff_comb", False)

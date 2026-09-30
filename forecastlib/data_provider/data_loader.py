@@ -88,13 +88,69 @@ class Dataset_Custom(BaseForecastDataset):
 
         self.scale = scale
         self.diff = getattr(args, "diff", False)
+        # Known future covariates, e.g. forecast precipitation. They are taken out of the data columns and
+        # appended to the marks after the time features, so seq_y_mark carries their values for the forecast steps.
+        self.known_cols = list(getattr(args, "known_cols", None) or [])
+        if self.target in self.known_cols:
+            msg = f"The target {self.target!r} can't also be a known covariate (known_cols={self.known_cols})"
+            raise ValueError(msg)
+        # Known future values for models that only read seq_x: {column: n} shifts the column n steps back, so row t
+        # holds the value of t + n and the last n rows of each seq_x window cover the forecast period. In production
+        # those last n rows are filled with the forecast (e.g. DWD precipitation).
+        self.shift_cols = dict(getattr(args, "shift_cols", None) or {})
+        self._validate_shift_cols()
         self.__read_data__()
+
+    def _validate_shift_cols(self) -> None:
+        for col, n in self.shift_cols.items():
+            if col == self.target or col in self.known_cols:
+                msg = f"shift_cols: {col!r} can't be shifted, it is the target or in known_cols"
+                raise ValueError(msg)
+            if not isinstance(n, int) or not 0 < n <= self.pred_len:
+                msg = f"shift_cols: shift for {col!r} must be an int in [1, pred_len={self.pred_len}], got {n!r}"
+                raise ValueError(msg)
+
+    def _split_covariates(self, df_raw: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Take the known_cols out of df_raw and apply shift_cols. Returns (df_raw, df_known)."""
+        for option, cols in (("known_cols", self.known_cols), ("shift_cols", self.shift_cols)):
+            missing = [c for c in cols if c not in df_raw.columns]
+            if missing:
+                msg = f"{option} {missing} not found in {self.data_path}"
+                raise KeyError(msg)
+        df_known = df_raw[self.known_cols]
+        df_raw = df_raw.drop(columns=self.known_cols)
+
+        if self.shift_cols:
+            for col, n in self.shift_cols.items():
+                df_raw[col] = df_raw[col].shift(-n)
+            # The last rows have no future value to shift in, drop them before splitting.
+            n_max = max(self.shift_cols.values())
+            df_raw = df_raw.iloc[:-n_max]
+            df_known = df_known.iloc[:-n_max]
+        return df_raw, df_known
+
+    def _append_known(
+        self, data_stamp: np.ndarray, df_known: pd.DataFrame, train_rows: slice, split_rows: slice
+    ) -> np.ndarray:
+        """Append the known covariates to the marks, after the time features.
+
+        They get their own scaler, so self.scaler (and inverse_transform) only covers the data columns.
+        """
+        self.known_scaler = None
+        if not self.known_cols:
+            return data_stamp
+        known = df_known.values
+        if self.scale:
+            self.known_scaler = StandardScaler().fit(known[train_rows])
+            known = self.known_scaler.transform(known)
+        return np.concatenate([data_stamp, known[split_rows]], axis=1)
 
     def __read_data__(self):
         self.scaler = StandardScaler()
         df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
         date_col = getattr(self.args, "date_col", "date")
         df_raw = df_raw.rename(columns={date_col: "date"})
+        df_raw, df_known = self._split_covariates(df_raw)
 
         """
         df_raw.columns: ['date', ...(other features), target feature]
@@ -148,6 +204,10 @@ class Dataset_Custom(BaseForecastDataset):
         else:
             msg_0 = f"Invalid timeenc value: {self.timeenc}"
             raise ValueError(msg_0)
+
+        data_stamp = self._append_known(
+            data_stamp, df_known, train_rows=slice(border1s[0], border2s[0]), split_rows=slice(border1, border2)
+        )
 
         self.data_x = data[border1:border2]
         self.data_y = data[border1:border2]

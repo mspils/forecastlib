@@ -210,14 +210,15 @@ def load_model_settings(model_dir: Path, device: str | torch.device = None) -> C
         yaml.YAMLError: If the YAML file cannot be parsed.
 
     Notes:
-        - Pickled scaler and device objects are automatically deserialized if present in the YAML.
+        - Pickled scaler, known_scaler and device objects are automatically deserialized if present in the YAML.
         - If device deserialization fails, it is silently suppressed and the YAML value is retained.
 
     """
     with (model_dir / "hparams.yaml").open(encoding="utf-8") as file:
         yaml_data = yaml.load(file, Loader=yaml.FullLoader)
-        if "scaler" in yaml_data:
-            yaml_data["scaler"] = pickle.loads(yaml_data["scaler"])
+        for key in ("scaler", "known_scaler"):
+            if key in yaml_data:
+                yaml_data[key] = pickle.loads(yaml_data[key])
 
         if device is not None:
             yaml_data["device"] = device

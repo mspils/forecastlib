@@ -351,6 +351,9 @@ class TemporalFusionDecoder(nn.Module):
 
 
 class Model(nn.Module):
+    # Extra x_mark columns after the time features (configs.known_len_extra) are embedded as known variables.
+    supports_known_covariates = True
+
     def __init__(self, configs):
         super().__init__()
         self.configs = configs

@@ -83,6 +83,22 @@ model_dict = {
 uncertain_model_dict = {"LSTM_uncertain": LSTM_uncertain.Model}
 
 
+def check_known_covariates(args, model_class, model_name):
+    """Fail early if known covariates are configured for a model that can't take them.
+
+    Known covariates (known_cols) widen x_mark beyond the time features. Only models that set
+    supports_known_covariates = True handle that; the others embed x_mark with DataEmbedding, which expects exactly
+    the time features, and would fail deep inside the model.
+    """
+    known_cols = getattr(args, "known_cols", None)
+    if known_cols and not getattr(model_class, "supports_known_covariates", False):
+        msg = (
+            f"{model_name} doesn't support known covariates, but known_cols={list(known_cols)} is set. "
+            "Use a model with supports_known_covariates = True (e.g. TemporalFusionTransformer) or remove known_cols."
+        )
+        raise ValueError(msg)
+
+
 class CustomLightningModule(pl.LightningModule):
     def __init__(self, args):
         super().__init__()
@@ -98,6 +114,7 @@ class CustomLightningModule(pl.LightningModule):
         self.scaler = args.scaler  # This one we don't want to track, i think. Because it's in a pickled represantation in the data_moduls hparams
         self.Model_class = resolve_class(self.args.model, model_dict, "args.model")
         self.model_name = class_name(self.args.model, model_dict)
+        check_known_covariates(self.args, self.Model_class, self.model_name)
         self.model = self.Model_class(self.args).float()
         self.criterion = self.loss_dict[self.args.loss]
 
@@ -213,6 +230,8 @@ class CustomLightningModule(pl.LightningModule):
     def from_db(cls, yaml_clob, model_blob, device=None, model_class=None):
         yaml_data = yaml.load(yaml_clob, Loader=yaml.FullLoader)
         yaml_data["scaler"] = pickle.loads(yaml_data["scaler"])
+        if "known_scaler" in yaml_data:
+            yaml_data["known_scaler"] = pickle.loads(yaml_data["known_scaler"])
         yaml_data["model"] = model_class or yaml_data["model"]
 
         if "device" in yaml_data:
@@ -407,6 +426,7 @@ class UncertaintyLightningModule(pl.LightningModule):  # TODO an Timeserieslibra
         self.scaler = args.scaler  # This one we don't want to track, i think. Because it's in a pickled represantation in the data_moduls hparams
         self.Model_class = resolve_class(self.args.model, uncertain_model_dict, "args.model")
         self.model_name = class_name(self.args.model, uncertain_model_dict)
+        check_known_covariates(self.args, self.Model_class, self.model_name)
         self.model = self.Model_class(self.args).float()
         self.criterion = self.loss_dict[self.args.loss]
         # self.f_dim = -1 if self.args.features == 'MS' else 0
