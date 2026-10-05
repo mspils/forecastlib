@@ -1,5 +1,8 @@
 """Contains callbacks for LightningModules."""
 
+from collections.abc import Callable
+from typing import Any
+
 import lightning.pytorch as pl
 import torch
 from lightning.pytorch.accelerators import CPUAccelerator
@@ -353,6 +356,13 @@ def combine_pred_conditional(pred, pred_diff, pred_metric, pred_diff_metric, com
     return pred_adjusted
 
 
+def _series_or_nan(function: Callable, *args: Any, selected: bool, shape: torch.Size) -> torch.Tensor:
+    """Return function(*args), a metric series over the selected samples, or NaN per step if none were selected."""
+    if not selected:
+        return torch.full(shape, float("nan"))
+    return function(*args)
+
+
 class StepWiseMetricsCallbackWaterlevel(Callback):
     """Callback with 2 tasks
     First initialize all metrics and losses so that they are displayed in the tensorboard hyperparameter tab.
@@ -462,21 +472,32 @@ class StepWiseMetricsCallbackWaterlevel(Callback):
 
             for f_name, f_function in self.filter_dict.items():
                 mask = f_function(x, true, pred)
+                # A custom filter can select no sample at all; its metrics are then NaN per step.
+                selected = bool(torch.as_tensor(mask).any())
+                shape = true.shape[1:]
                 for m_name, m_function in self.chosen_metrics.items():
                     full_m_name = f"{subset_name}_{m_name}{f_name}"
-                    metric_dict[full_m_name] = m_function(true[mask], pred[mask])
+                    metric_dict[full_m_name] = _series_or_nan(
+                        m_function, true[mask], pred[mask], selected=selected, shape=shape
+                    )
 
                 if quantiles is not None:
-                    metric_dict[f"{subset_name}_pinball{f_name}"] = pinball_series(true[mask], pred_q[mask], quantiles)
-                    metric_dict[f"{subset_name}_crossing{f_name}"] = quantile_crossing_series(pred_q[mask])
+                    metric_dict[f"{subset_name}_pinball{f_name}"] = _series_or_nan(
+                        pinball_series, true[mask], pred_q[mask], quantiles, selected=selected, shape=shape
+                    )
+                    metric_dict[f"{subset_name}_crossing{f_name}"] = _series_or_nan(
+                        quantile_crossing_series, pred_q[mask], selected=selected, shape=shape
+                    )
                     # Symmetric bands, widest first: (q10,q90) for the default levels.
                     for i in range(len(quantiles) // 2):
                         lower, upper = pred_q[mask][..., i], pred_q[mask][..., -(i + 1)]
                         nominal = int(round((quantiles[-(i + 1)] - quantiles[i]) * 100))
-                        metric_dict[f"{subset_name}_coverage_{nominal}{f_name}"] = coverage_series(
-                            true[mask], lower, upper
+                        metric_dict[f"{subset_name}_coverage_{nominal}{f_name}"] = _series_or_nan(
+                            coverage_series, true[mask], lower, upper, selected=selected, shape=shape
                         )
-                        metric_dict[f"{subset_name}_interval_{nominal}{f_name}"] = interval_width_series(lower, upper)
+                        metric_dict[f"{subset_name}_interval_{nominal}{f_name}"] = _series_or_nan(
+                            interval_width_series, lower, upper, selected=selected, shape=shape
+                        )
 
                 if isinstance(pl_module, UncertaintyLightningModule):
                     for conf_level, z_score in self.z_scores.items():
@@ -484,11 +505,12 @@ class StepWiseMetricsCallbackWaterlevel(Callback):
                         lower_bound = pred - conf_size
                         upper_bound = pred + conf_size
 
-                        coverage = ((lower_bound <= true) & (true <= upper_bound))[mask].float().mean(dim=0)
-
-                        metric_dict[f"{subset_name}_coverage_{int(conf_level * 100)}{f_name}"] = coverage
-                        metric_dict[f"{subset_name}_interval_{int(conf_level * 100)}{f_name}"] = conf_size[mask].mean(
-                            axis=0
+                        inside = ((lower_bound <= true) & (true <= upper_bound))[mask].float()
+                        metric_dict[f"{subset_name}_coverage_{int(conf_level * 100)}{f_name}"] = _series_or_nan(
+                            torch.mean, inside, 0, selected=selected, shape=shape
+                        )
+                        metric_dict[f"{subset_name}_interval_{int(conf_level * 100)}{f_name}"] = _series_or_nan(
+                            torch.mean, conf_size[mask], 0, selected=selected, shape=shape
                         )
 
         if trainer.datamodule.hparams.get("features") == "M":

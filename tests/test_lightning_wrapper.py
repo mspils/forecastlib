@@ -67,3 +67,22 @@ def test_metric_callbacks_reload_model(data_args, tmp_path, callback_class, feat
     """The callbacks reload the checkpoint in on_fit_end, which must also work for a custom model class."""
     dm, args = make_model_args(data_args | {"features": features}, model)
     fit(CustomLightningModule(args), dm, tmp_path, callbacks=[callback_class()])
+
+
+def test_filter_without_samples_gives_nan(data_args, tmp_path):
+    """A custom filter that selects nothing must give NaN metrics, not crash or log garbage."""
+    filters = {
+        "": lambda x, true, pred: torch.ones(x.shape[0], dtype=torch.bool),  # noqa: ARG005
+        "_none": lambda x, true, pred: torch.zeros(x.shape[0], dtype=torch.bool),  # noqa: ARG005
+        "_some": lambda x, true, pred: torch.arange(x.shape[0]) % 2 == 0,  # noqa: ARG005
+    }
+    callback = StepWiseMetricsCallbackWaterlevel(filter_dict=filters)
+    dm, args = make_model_args(data_args, "DLinear")
+    fit(CustomLightningModule(args), dm, tmp_path, callbacks=[callback])
+
+    for split in ("train", "val", "test"):
+        for metric in ("mse", "kge", "conf50"):  # conf50 uses torch.quantile, which fails on empty input
+            assert torch.isnan(callback.metric_dict[f"{split}_{metric}_none"]).all()
+            assert callback.metric_dict[f"{split}_{metric}_none"].shape == (PRED_LEN,)
+            assert not torch.isnan(callback.metric_dict[f"{split}_{metric}_some"]).any()
+            assert not torch.isnan(callback.metric_dict[f"{split}_{metric}"]).any()
