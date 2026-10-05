@@ -192,6 +192,7 @@ class Dataset_Custom(BaseForecastDataset):
 
         df_stamp = df_raw[["date"]][border1:border2]
         df_stamp["date"] = pd.to_datetime(df_stamp.date)
+        self.dates = pd.DatetimeIndex(df_stamp["date"])  # row i of data_x / data_x_raw is at dates[i]
         if self.timeenc == 0:
             df_stamp["month"] = df_stamp.date.apply(lambda row: row.month)
             df_stamp["day"] = df_stamp.date.apply(lambda row: row.day)

@@ -28,6 +28,7 @@ dependencies = [
     "sympy>=1.13.3",
     "torch>=2.4.1",
     "tqdm>=4.67.1",
+    "tensorboard>=2.21.0",
 ]
 
 [project.optional-dependencies]
@@ -55,6 +56,10 @@ dev = [
     "poethepoet>=0.42.0",
     "pytest>=9.0.2",
     "ruff>=0.15.2",
+]
+analysis = [
+    "jupyter>=1.1.1",
+    "kaleido>=1.4.0",
 ]
 
 [tool.poe.tasks]
