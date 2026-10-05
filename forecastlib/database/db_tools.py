@@ -145,8 +145,7 @@ class DBModelDataset(Dataset):
             self.common_indexes = self.timestamps
         else:
             self.common_indexes = sorted(
-                self
-                .df_ext[self.df_ext["horizon_step"] == 1]
+                self.df_ext[self.df_ext["horizon_step"] == 1]
                 .groupby("sensor_name")
                 .apply(lambda x: set(x.index))
                 .pipe(lambda x: set.intersection(*x))

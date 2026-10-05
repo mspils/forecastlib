@@ -209,12 +209,17 @@ def trained_runs(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def forecasts(trained_runs):
-    return fa.predict(trained_runs, label="moving_avg")
+def analysis(trained_runs):
+    return fa.Analysis(runs=trained_runs)
+
+
+@pytest.fixture(scope="module")
+def forecasts(analysis):
+    return analysis.predict(label="moving_avg")
 
 
 def test_predict_matches_predict_step(trained_runs, forecasts):
-    assert list(forecasts.columns) == fa.forecasts.FORECAST_COLUMNS
+    assert list(forecasts.columns) == [c for c in fa.forecasts.FORECAST_COLUMNS if c != "member"]
     assert list(forecasts["label"].cat.categories) == ["5", "9"]
 
     run = "dlinear_9"
@@ -235,17 +240,34 @@ def test_predict_matches_predict_step(trained_runs, forecasts):
         assert np.allclose(ours["observed"], true[0, :, 0].numpy(), atol=1e-4)
 
 
-def test_predict_period(trained_runs, forecasts):
+def test_predict_period(analysis, forecasts):
     times = forecasts["issue_time"].drop_duplicates().sort_values().to_list()
-    part = fa.predict(trained_runs, start=times[5], end=times[9])
+    part = analysis.predict(start=times[5], end=times[9])
 
     assert part["issue_time"].drop_duplicates().to_list() == times[5:10]
     merged = part.merge(forecasts, on=["run", "issue_time", "step"], suffixes=("", "_full"))
     assert len(merged) == len(part)
     assert np.allclose(merged["prediction"], merged["prediction_full"], atol=1e-5)
 
-    with pytest.raises(ValueError, match="No forecasts"):
-        fa.predict(trained_runs, start="2100-01-01")
+    every = analysis.predict(start=times[5], end=times[20], every=5, label="moving_avg")
+    assert every["issue_time"].drop_duplicates().to_list() == times[5:21:5]
+
+    with pytest.raises(ValueError, match="No issue times"):
+        analysis.predict(start="2100-01-01")
+
+
+def test_analysis_filter_and_metrics(analysis):
+    lstm_like = analysis.filter("moving_avg == 9")
+    assert set(lstm_like.runs["run"]) == {"dlinear_9"}
+    assert len(analysis.runs["run"].unique()) == 2  # the original is unchanged
+    assert set(analysis.filter(analysis.runs["moving_avg"] == 5).runs["run"]) == {"dlinear_5"}
+    assert set(analysis.filter(lambda runs: runs["moving_avg"] > 6).runs["run"]) == {"dlinear_9"}
+
+
+def test_analysis_secondary_by_name(analysis, forecasts):
+    fig, data = analysis.plot_forecasts(forecasts, every=10, secondary="a", return_data=True)
+    assert "a" in {t.name for t in fig.data}
+    assert set(data.loc[data["axis"] == "secondary", "label"]) == {"a"}
 
 
 def test_plot_issue(forecasts):

@@ -1,7 +1,8 @@
-"""Plotly figures for load_runs and predict tables.
+"""Plotly figures for load_runs tables and forecast tables (Analysis.predict).
 
 Every function takes the DataFrame (filter it with pandas first) and returns the figure, or (figure, data) with
-``return_data=True``, where data holds exactly the values that were plotted.
+``return_data=True``, where data holds exactly the values that were plotted. Ensemble members (a member column)
+are drawn as separate thin lines, grouped under their label in the legend.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import plotly.graph_objects as go
 from plotly.colors import hex_to_rgb, qualitative
 from plotly.subplots import make_subplots
 
-from forecastlib.analysis.forecasts import quantile_columns
+from forecastlib.analysis.forecasts import quantile_columns, select_times
 from forecastlib.analysis.runs import _as_list, aggregate, summary
 
 if TYPE_CHECKING:
@@ -154,7 +155,7 @@ def plot_issue(
         [
             _observed_rows(observed),
             issued.rename(columns={"valid_time": "time", "prediction": "value"})[
-                ["label", "run", "time", "value", *quantiles]
+                ["label", "run", *_member(forecasts), "time", "value", *quantiles]
             ],
         ],
         ignore_index=True,
@@ -205,10 +206,12 @@ def plot_lead(
         frames.append(_observed_rows(observed).assign(step=step))
         frames.append(
             at_step.rename(columns={"valid_time": "time", "prediction": "value"})[
-                ["step", "label", "run", "time", "value", *quantiles]
+                ["step", "label", "run", *_member(forecasts), "time", "value", *quantiles]
             ]
         )
-    data = pd.concat(frames, ignore_index=True)[["step", "label", "run", "time", "value", *quantiles]]
+    data = pd.concat(frames, ignore_index=True)[
+        ["step", "label", "run", *_member(forecasts), "time", "value", *quantiles]
+    ]
     data["axis"] = "primary"
 
     labels = _labels(forecasts)
@@ -266,7 +269,7 @@ def plot_forecasts(
         raise ValueError(msg)
     observed = _observed(forecasts).loc[selected["issue_time"].min() : selected["valid_time"].max()]
 
-    columns = ["label", "run", "issue_time", "step", "time", "value", *quantile_columns(forecasts)]
+    columns = ["label", "run", *_member(forecasts), "issue_time", "step", "time", "value", *quantile_columns(forecasts)]
     data = pd.concat(
         [_observed_rows(observed), selected.rename(columns={"valid_time": "time", "prediction": "value"})],
         ignore_index=True,
@@ -310,15 +313,7 @@ def select_forecasts(
     E.g. ``hours=12`` keeps the midday runs, ``every=6`` every 6th issue time, ``hours=[0, 12], every=2`` the
     midday and midnight runs of every other day.
     """
-    times = forecasts["issue_time"].drop_duplicates().sort_values()
-    if start is not None:
-        times = times[times >= pd.Timestamp(start)]
-    if end is not None:
-        times = times[times <= pd.Timestamp(end)]
-    if hours is not None:
-        times = times[times.dt.hour.isin(_as_list(hours))]
-    if every is not None:
-        times = times.iloc[::every]
+    times = select_times(forecasts["issue_time"], start=start, end=end, every=every, hours=hours)
     return forecasts[forecasts["issue_time"].isin(times)]
 
 
@@ -372,10 +367,14 @@ def _with_gaps(forecasts: pd.DataFrame) -> tuple[pd.Series, pd.Series, pd.Series
 
     One trace per label instead of one per forecast keeps plots with hundreds of forecasts fast.
     """
-    gaps = forecasts.groupby("issue_time", as_index=False).agg(valid_time=("valid_time", "max"))
+    keys = ["issue_time", *_member(forecasts)]  # one forecast: an issue time (and member)
+    gaps = forecasts.groupby(keys, as_index=False, sort=False).agg(valid_time=("valid_time", "max"))
     gaps = gaps.assign(step=np.inf, prediction=np.nan)  # NaN breaks the line, inf sorts it last
-    joined = pd.concat([forecasts[gaps.columns], gaps], ignore_index=True).sort_values(["issue_time", "step"])
-    return joined["valid_time"], joined["prediction"], joined["issue_time"].dt.strftime("%Y-%m-%d %H:%M")
+    joined = pd.concat([forecasts[gaps.columns], gaps], ignore_index=True).sort_values([*keys, "step"])
+    issued = joined["issue_time"].dt.strftime("%Y-%m-%d %H:%M")
+    if "member" in keys:
+        issued = issued + ", member " + joined["member"].astype(str)
+    return joined["valid_time"], joined["prediction"], issued
 
 
 def _add_series(
@@ -410,18 +409,21 @@ def _add_series(
         if quantiles and series[quantiles].notna().any().any():
             lower, upper = series[quantiles[0]], series[quantiles[-1]]
             _add_band(fig, series["time"], lower, upper, label, colors[label], position)
-        fig.add_trace(
-            go.Scatter(
-                x=series["time"],
-                y=series["value"],
-                mode="lines",
-                name=label,
-                legendgroup=label,
-                showlegend=legend,
-                line={"color": colors[label]},
-            ),
-            **position,
-        )
+        members = list(series.groupby("member", sort=False)) if "member" in series.columns else [(None, series)]
+        for i, (member, line) in enumerate(members):
+            fig.add_trace(
+                go.Scatter(
+                    x=line["time"],
+                    y=line["value"],
+                    mode="lines",
+                    name=label,
+                    legendgroup=label,
+                    showlegend=legend and i == 0,
+                    line={"color": colors[label], "width": 2 if member is None else 1},
+                    hovertemplate=None if member is None else f"{label}, member {member}: %{{y:.4g}}<extra></extra>",
+                ),
+                **position,
+            )
 
 
 def _add_band(
@@ -435,6 +437,11 @@ def _add_band(
         go.Scatter(y=lower, fill="tonexty", fillcolor=f"rgba({r},{g},{b},{BAND_OPACITY})", hoverinfo="skip", **common),
         **position,
     )
+
+
+def _member(forecasts: pd.DataFrame) -> list[str]:
+    """["member"] for ensemble forecast tables, else []."""
+    return ["member"] if "member" in forecasts.columns else []
 
 
 def _colors(groups: list[str]) -> dict[str, str]:

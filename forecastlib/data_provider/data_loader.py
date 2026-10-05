@@ -50,8 +50,9 @@ class BaseForecastDataset(Dataset):
         self.args = args
         self.seq_len, self.label_len, self.pred_len = size
 
-        assert flag in {"train", "val", "test"}
-        self.set_type = {"train": 0, "val": 1, "test": 2}[flag]
+        # "all": every row, no split. Used for inference on a prepared frame (Dataset_Custom only).
+        assert flag in {"train", "val", "test", "all"}
+        self.set_type = {"train": 0, "val": 1, "test": 2, "all": 3}[flag]
 
         if features not in FEATURE_TYPES:
             msg = f"Invalid feature type: {features!r}"
@@ -81,12 +82,24 @@ class Dataset_Custom(BaseForecastDataset):
         timeenc=0,
         freq="h",
         seasonal_patterns=None,
+        frame: pd.DataFrame | None = None,
+        scaler: StandardScaler | None = None,
+        known_scaler: StandardScaler | None = None,
     ) -> None:
+        """See the module for the data options (args.known_cols, args.shift_cols, args.diff, ...).
+
+        Inference on prepared data: ``frame`` replaces reading root_path/data_path (same layout as the file, or
+        indexed by time), ``scaler``/``known_scaler`` replace fitting on the train split, e.g. the ones saved with
+        the model, and ``flag="all"`` uses every row instead of a split.
+        """
         if size is None:
             size = (24 * 4 * 4, 24 * 4, 24 * 4)
         super().__init__(args, root_path, data_path, flag, size, features, target, timeenc, freq)
 
         self.scale = scale
+        self.frame = frame
+        self.fixed_scaler = scaler
+        self.fixed_known_scaler = known_scaler
         self.diff = getattr(args, "diff", False)
         # Known future covariates, e.g. forecast precipitation. They are taken out of the data columns and
         # appended to the marks after the time features, so seq_y_mark carries their values for the forecast steps.
@@ -141,13 +154,22 @@ class Dataset_Custom(BaseForecastDataset):
             return data_stamp
         known = df_known.values
         if self.scale:
-            self.known_scaler = StandardScaler().fit(known[train_rows])
+            self.known_scaler = self.fixed_known_scaler or StandardScaler().fit(known[train_rows])
             known = self.known_scaler.transform(known)
         return np.concatenate([data_stamp, known[split_rows]], axis=1)
 
+    def _read_raw(self) -> pd.DataFrame:
+        """Return the raw data with the date column. Override to read other formats, e.g. parquet."""
+        date_col = getattr(self.args, "date_col", "date")
+        if self.frame is None:
+            return pd.read_csv(os.path.join(self.root_path, self.data_path))
+        if date_col not in self.frame.columns and isinstance(self.frame.index, pd.DatetimeIndex):
+            return self.frame.rename_axis(date_col).reset_index()
+        return self.frame.copy()
+
     def __read_data__(self):
-        self.scaler = StandardScaler()
-        df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
+        self.scaler = self.fixed_scaler or StandardScaler()
+        df_raw = self._read_raw()
         date_col = getattr(self.args, "date_col", "date")
         df_raw = df_raw.rename(columns={date_col: "date"})
         df_raw, df_known = self._split_covariates(df_raw)
@@ -162,8 +184,8 @@ class Dataset_Custom(BaseForecastDataset):
         num_train = int(len(df_raw) * 0.7)
         num_test = int(len(df_raw) * 0.2)
         num_vali = len(df_raw) - num_train - num_test
-        border1s = [0, num_train - self.seq_len, len(df_raw) - num_test - self.seq_len]
-        border2s = [num_train, num_train + num_vali, len(df_raw)]
+        border1s = [0, num_train - self.seq_len, len(df_raw) - num_test - self.seq_len, 0]
+        border2s = [num_train, num_train + num_vali, len(df_raw), len(df_raw)]
         border1 = border1s[self.set_type]
         border2 = border2s[self.set_type]
 
@@ -184,8 +206,8 @@ class Dataset_Custom(BaseForecastDataset):
         self.data_x_raw = df_data[border1:border2]
         self.width = df_data.shape[1]
         if self.scale:
-            train_data = df_data[border1s[0] : border2s[0]]
-            self.scaler.fit(train_data.values)
+            if self.fixed_scaler is None:
+                self.scaler.fit(df_data[border1s[0] : border2s[0]].values)
             data = self.scaler.transform(df_data.values)
         else:
             data = df_data.values

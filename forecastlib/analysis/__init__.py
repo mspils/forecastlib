@@ -1,24 +1,26 @@
 """Analysis of trained runs with pandas and plotly.
 
-Load metrics or forecasts into long DataFrames, filter them with pandas, then aggregate and plot::
+``Analysis`` holds the runs of an experiment and loads models and data through hooks (see
+forecastlib.analysis.analysis for subclassing, e.g. other file formats or ensemble forecasts)::
 
-    from forecastlib import analysis as fa
+    from forecastlib.analysis import Analysis
 
-    runs = fa.load_runs("logs/experiment_1")
-    lstm = runs[runs.model == "LSTM"]
-    fa.summary(runs, ["nse", "kge"]).sort_values("nse")
-    fa.plot_horizon(runs, ["nse", "mse"], split=["val", "test"], by="model", band="std")
+    analysis = Analysis("logs/experiment_1")
+    analysis.runs                                  # metrics + hyperparameters, a plain long DataFrame
+    analysis.summary(["nse", "kge"]).sort_values("nse")
+    analysis.plot_horizon(["nse", "mse"], split=["val", "test"], by="model", band="std")
 
-    forecasts = fa.predict(lstm, start="2022-02-15", end="2022-03-01", label="num_layers")
-    fa.plot_issue(forecasts, "2022-02-21 10:00")
-    fa.plot_lead(forecasts, [1, 24, 48])
-    fa.plot_forecasts(forecasts, hours=12)  # every midday forecast as its own line
+    lstm = analysis.filter("model == 'LSTM'")
+    forecasts = lstm.predict(start="2022-02-15", end="2022-03-01", label="num_layers")
+    lstm.plot_issue(forecasts, "2022-02-21 10:00")
+    lstm.plot_lead(forecasts, [1, 24, 48])
+    lstm.plot_forecasts(forecasts, hours=12, secondary="yw_reinbek")  # every midday forecast, a 2nd y-axis
 
-    data = fa.load_data(lstm)  # the data file, indexed by time, for a second y-axis
-    fa.plot_forecasts(forecasts, hours=12, secondary=data["yw_reinbek"])
+The functions behind the methods work on the DataFrames directly, e.g. ``plot_horizon(runs, ...)``.
 """
 
-from forecastlib.analysis.forecasts import load_data, predict, quantile_columns
+from forecastlib.analysis.analysis import Analysis
+from forecastlib.analysis.forecasts import load_data, quantile_columns, select_times
 from forecastlib.analysis.plots import (
     plot_forecasts,
     plot_horizon,
@@ -37,6 +39,7 @@ from forecastlib.analysis.runs import (
 )
 
 __all__ = [
+    "Analysis",
     "aggregate",
     "hparam_columns",
     "load_data",
@@ -47,9 +50,9 @@ __all__ = [
     "plot_hparam",
     "plot_issue",
     "plot_lead",
-    "predict",
     "quantile_columns",
     "select_forecasts",
+    "select_times",
     "summary",
     "varying_hparams",
 ]
