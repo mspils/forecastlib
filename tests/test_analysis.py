@@ -383,3 +383,70 @@ def test_secondary_axis(forecasts, trained_runs, plot):
 def test_secondary_needs_time_index(forecasts):
     with pytest.raises(TypeError, match="DatetimeIndex"):
         fa.plot_forecasts(forecasts, secondary=pd.Series([1.0, 2.0]))
+
+
+def test_show_observations_around_the_forecasts(analysis):
+    """Analysis plots show the observations before and after a short predicted period, from the data file."""
+    times = analysis.predict(label="moving_avg")["issue_time"].drop_duplicates().sort_values().to_list()
+    part = analysis.predict(start=times[20], end=times[22], label="moving_avg")
+    show_start, show_end = times[0], times[60]
+
+    for fig, data in (
+        analysis.plot_forecasts(part, show_start=show_start, show_end=show_end, return_data=True),
+        analysis.plot_issue(part, times[21], show_start=show_start, show_end=show_end, return_data=True),
+    ):
+        observed = data[data["label"] == "observed"]
+        assert observed["time"].min() == show_start  # before the first predicted issue time
+        assert observed["time"].max() == show_end  # long after the last forecast step
+        assert observed["time"].diff().dropna().eq(pd.Timedelta(hours=1)).all()
+        expected = analysis.observations["OT"].loc[show_start:show_end]
+        assert np.allclose(observed["value"], expected)
+        assert [pd.Timestamp(t) for t in fig.layout.xaxis.range] == [show_start, show_end]
+
+    # Without show_start/show_end the default ranges stay as before.
+    data = analysis.plot_forecasts(part, return_data=True)[1]
+    observed = data[data["label"] == "observed"]
+    assert observed["time"].min() == times[20]
+    assert observed["time"].max() == times[22] + pd.Timedelta(hours=PRED_LEN)
+
+
+def test_plot_functions_use_table_or_given_observations(analysis):
+    times = analysis.predict(label="moving_avg")["issue_time"].drop_duplicates().sort_values().to_list()
+    part = analysis.predict(start=times[20], end=times[22])
+
+    # The plain function only knows the observations in the table ...
+    data = fa.plot_forecasts(part, show_start=times[0], show_end=times[60], return_data=True)[1]
+    observed = data[data["label"] == "observed"]
+    assert observed["time"].min() == times[21]  # the first valid time in the table
+    # ... unless the full series is passed.
+    full = fa.load_data(analysis.runs)["OT"]
+    data = fa.plot_forecasts(part, show_start=times[0], show_end=times[60], observed=full, return_data=True)[1]
+    assert data.loc[data["label"] == "observed", "time"].min() == times[0]
+
+    lead = fa.plot_lead(part, 1, start=times[0], end=times[60], observed=full, return_data=True)[1]
+    assert lead.loc[lead["label"] == "observed", "time"].min() == times[0]
+
+    with pytest.raises(TypeError, match="DatetimeIndex"):
+        fa.plot_forecasts(part, observed=full.reset_index(drop=True))
+
+
+def test_unshift_only_moves_the_plotted_series(trained_runs):
+    plain = fa.Analysis(runs=trained_runs)
+    unshifted = fa.Analysis(runs=trained_runs, unshift={"a": 3})
+    times = plain.predict()["issue_time"].drop_duplicates().sort_values().to_list()
+
+    # The models get the column as in the file, so the forecasts don't change.
+    forecasts = unshifted.predict(start=times[10], end=times[12])
+    reference = plain.predict(start=times[10], end=times[12])
+    assert np.allclose(forecasts["prediction"], reference["prediction"])
+    assert unshifted.observations["a"].equals(plain.observations["a"])
+
+    # The secondary series is drawn n rows later, the filtered copy keeps the setting.
+    data = unshifted.filter("moving_avg == 5").plot_forecasts(forecasts, secondary="a", return_data=True)[1]
+    secondary = data[data["axis"] == "secondary"].set_index("time")["value"]
+    expected = plain.observations["a"].shift(3).loc[secondary.index]
+    assert np.allclose(secondary, expected)
+    assert not np.allclose(secondary, plain.observations["a"].loc[secondary.index])
+
+    with pytest.raises(KeyError, match="rain"):
+        fa.Analysis(runs=trained_runs, unshift={"rain": 1}).plot_forecasts(forecasts, secondary="a")

@@ -126,6 +126,9 @@ def plot_issue(
     issue_time: Any,
     *,
     history: int | None = None,
+    show_start: Any = None,
+    show_end: Any = None,
+    observed: pd.Series | None = None,
     secondary: pd.Series | pd.DataFrame | None = None,
     title: str | None = None,
     return_data: bool = False,
@@ -135,8 +138,11 @@ def plot_issue(
     Args:
         forecasts: A predict table (or a filtered part of it).
         issue_time: Anything pd.Timestamp accepts.
-        history: Number of observed steps shown before the issue time, default 2 * pred_len. Observations are
-            taken from the table, so the history only reaches back to the first predicted issue time.
+        history: Number of observed steps shown before the issue time, default 2 * pred_len.
+        show_start: Show the observations (and the x-axis) from this time on, instead of history.
+        show_end: Show the observations up to this time, e.g. to see what came after.
+        observed: The full observed target indexed by time, e.g. from the data file. Default: the observations in
+            the forecast table, which only cover the predicted period. Analysis passes its observations.
         secondary: Series or DataFrame indexed by time, e.g. columns of load_data, drawn dotted on a second y-axis.
         title: Figure title, default the issue time.
         return_data: Also return the plotted data: label, run, time, value, axis and the quantile columns.
@@ -146,9 +152,10 @@ def plot_issue(
     issued = forecasts[forecasts["issue_time"] == issue]
     history = 2 * int(forecasts["step"].max()) if history is None else history
 
-    observed = _observed(forecasts)
-    before = observed.loc[:issue].iloc[-history:]
-    observed = observed.loc[before.index[0] : issued["valid_time"].max()]
+    observed = _observed(forecasts, observed)
+    first = pd.Timestamp(show_start) if show_start is not None else observed.loc[:issue].iloc[-history:].index[0]
+    last = pd.Timestamp(show_end) if show_end is not None else issued["valid_time"].max()
+    observed = observed.loc[first:last]
 
     quantiles = quantile_columns(forecasts)
     data = pd.concat(
@@ -163,9 +170,11 @@ def plot_issue(
     secondary = _secondary_frame(secondary)
     fig = _new_figure(secondary)
     _add_series(fig, data, _labels(forecasts), quantiles)
-    data = pd.concat([data, _add_secondary(fig, secondary, observed.index[0], observed.index[-1])], ignore_index=True)
+    data = pd.concat([data, _add_secondary(fig, secondary, first, last)], ignore_index=True)
     fig.add_vline(x=issue, line={"dash": "dot", "color": "grey"})
     fig.update_layout(title=title or f"Forecast issued {issue}", template=TEMPLATE, hovermode="x unified")
+    if show_start is not None or show_end is not None:
+        fig.update_xaxes(range=[first, last])
     return (fig, data) if return_data else fig
 
 
@@ -175,6 +184,7 @@ def plot_lead(
     *,
     start: Any = None,
     end: Any = None,
+    observed: pd.Series | None = None,
     secondary: pd.Series | pd.DataFrame | None = None,
     title: str | None = None,
     return_data: bool = False,
@@ -186,6 +196,8 @@ def plot_lead(
         steps: Forecast step(s), e.g. [1, 24, 48].
         start: Only show valid times at or after start.
         end: Only show valid times at or before end.
+        observed: The full observed target indexed by time, e.g. from the data file. Default: the observations in
+            the forecast table, which only cover the predicted period. Analysis passes its observations.
         secondary: Series or DataFrame indexed by time, e.g. columns of load_data, drawn dotted on a second y-axis.
         title: Figure title.
         return_data: Also return the plotted data: step, label, run, time, value, axis and the quantile columns.
@@ -196,7 +208,7 @@ def plot_lead(
     if unknown:
         msg = f"Unknown step(s) {unknown}, forecasts cover 1..{forecasts['step'].max()}"
         raise KeyError(msg)
-    observed = _observed(forecasts).loc[start:end]
+    observed = _observed(forecasts, observed).loc[start:end]
     in_period = forecasts["valid_time"].between(observed.index[0], observed.index[-1])
 
     quantiles = quantile_columns(forecasts)
@@ -242,14 +254,18 @@ def plot_forecasts(
     end: Any = None,
     every: int | None = None,
     hours: int | Iterable[int] | None = None,
+    show_start: Any = None,
+    show_end: Any = None,
+    observed: pd.Series | None = None,
     secondary: pd.Series | pd.DataFrame | None = None,
     title: str | None = None,
     return_data: bool = False,
 ) -> FigureResult:
     """Plot whole forecasts of several issue times against the observations, one line per forecast.
 
-    Lines are colored by label with one legend entry per label. The issue times are picked with select_forecasts,
-    the observations come from the whole table, so they stay continuous however few forecasts are shown.
+    Lines are colored by label with one legend entry per label. The issue times are picked with select_forecasts;
+    the observations stay continuous however few forecasts are shown, by default from the first selected issue time
+    to the last forecast step.
 
     Args:
         forecasts: A predict table (or a filtered part of it).
@@ -257,6 +273,10 @@ def plot_forecasts(
         end: Only forecasts issued at or before end.
         every: Only every n-th of the remaining issue times.
         hours: Only forecasts issued at these hours of the day, e.g. 12 for the midday runs.
+        show_start: Show the observations (and the x-axis) from this time on, e.g. to see what came before.
+        show_end: Show the observations up to this time, e.g. to see what came after.
+        observed: The full observed target indexed by time, e.g. from the data file. Default: the observations in
+            the forecast table, which only cover the predicted period. Analysis passes its observations.
         secondary: Series or DataFrame indexed by time, e.g. columns of load_data, drawn dotted on a second y-axis.
         title: Figure title.
         return_data: Also return the plotted data: label, run, issue_time, step, time, value, axis and the
@@ -267,7 +287,9 @@ def plot_forecasts(
     if selected.empty:
         msg = "No forecasts left after selecting by start, end, every and hours"
         raise ValueError(msg)
-    observed = _observed(forecasts).loc[selected["issue_time"].min() : selected["valid_time"].max()]
+    first = pd.Timestamp(show_start) if show_start is not None else selected["issue_time"].min()
+    last = pd.Timestamp(show_end) if show_end is not None else selected["valid_time"].max()
+    observed = _observed(forecasts, observed).loc[first:last]
 
     columns = ["label", "run", *_member(forecasts), "issue_time", "step", "time", "value", *quantile_columns(forecasts)]
     data = pd.concat(
@@ -295,8 +317,10 @@ def plot_forecasts(
                 hovertemplate=f"{label}<br>issued %{{customdata}}<br>%{{x}}: %{{y:.4g}}<extra></extra>",
             )
         )
-    data = pd.concat([data, _add_secondary(fig, secondary, observed.index[0], observed.index[-1])], ignore_index=True)
+    data = pd.concat([data, _add_secondary(fig, secondary, first, last)], ignore_index=True)
     fig.update_layout(title=title, template=TEMPLATE)
+    if show_start is not None or show_end is not None:
+        fig.update_xaxes(range=[first, last])
     return (fig, data) if return_data else fig
 
 
@@ -329,7 +353,7 @@ def _secondary_frame(secondary: pd.Series | pd.DataFrame | None) -> pd.DataFrame
 
 def _new_figure(secondary: pd.DataFrame | None, rows: int = 1, **subplot_options: Any) -> go.Figure:
     """Create a figure with one column of subplots, each with a second y-axis if there are secondary series."""
-    if secondary is None and rows == 1:
+    if secondary is None and rows == 1 and not subplot_options:
         return go.Figure()
     specs = [[{"secondary_y": secondary is not None}] for _ in range(rows)]
     return make_subplots(rows=rows, cols=1, specs=specs, **subplot_options)
@@ -457,11 +481,14 @@ def _labels(forecasts: pd.DataFrame) -> list[str]:
     return list(dict.fromkeys(forecasts["label"]))
 
 
-def _observed(forecasts: pd.DataFrame) -> pd.Series:
-    """Return the observations in a predict table, indexed by time."""
-    observed = forecasts.drop_duplicates("valid_time").set_index("valid_time")["observed"].sort_index()
-    observed.index.name = "time"
-    return observed
+def _observed(forecasts: pd.DataFrame, observed: pd.Series | None = None) -> pd.Series:
+    """Return the observations indexed by time: the given series, or the ones in the forecast table."""
+    if observed is None:
+        observed = forecasts.drop_duplicates("valid_time").set_index("valid_time")["observed"]
+    elif not isinstance(observed.index, pd.DatetimeIndex):
+        msg = "observed needs a DatetimeIndex, e.g. a column of fa.load_data(runs)"
+        raise TypeError(msg)
+    return observed.sort_index().rename_axis("time")
 
 
 def _observed_rows(observed: pd.Series) -> pd.DataFrame:

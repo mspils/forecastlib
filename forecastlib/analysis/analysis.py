@@ -59,6 +59,10 @@ class Analysis:
         runs: An already loaded (and maybe filtered) load_runs table.
         device: Device for the models, e.g. "cuda".
         batch_size: Prediction batch size.
+        unshift: {column: n} for columns of the data file whose row t holds the value of t + n (an artificial
+            forecast shifted in the file itself). For plotting they are moved n rows later, back to their own time.
+            Only the ``secondary`` series of the plots are affected, the models still get the columns as in the file.
+            Columns shifted by the dataset (shift_cols) are at their own time in the file already.
 
     Attributes:
         runs: The load_runs table: per-horizon metrics with the hyperparameters. Plain pandas, filter it directly
@@ -73,6 +77,7 @@ class Analysis:
         runs: pd.DataFrame | None = None,
         device: str = "cpu",
         batch_size: int = 256,
+        unshift: dict[str, int] | None = None,
     ) -> None:
         """Load the runs from logs, or take an already loaded runs table."""
         if (logs is None) == (runs is None):
@@ -81,7 +86,9 @@ class Analysis:
         self.runs = self.load_runs(logs) if runs is None else runs
         self.device = device
         self.batch_size = batch_size
+        self.unshift = dict(unshift or {})
         self._observations = None
+        self._plot_observations = None
         # Per run, shared with filtered copies.
         self._models: dict[str, Any] = {}
         self._settings: dict[str, ConfigTracker] = {}
@@ -179,7 +186,8 @@ class Analysis:
             runs = self.runs[mask]
         filtered = copy.copy(self)
         filtered.runs = runs
-        filtered._observations = None  # noqa: SLF001 - our own copy; another subset may use another data file
+        # Our own copy; another subset may use another data file.
+        filtered._observations = filtered._plot_observations = None  # noqa: SLF001
         return filtered
 
     def varying_hparams(self) -> list[str]:
@@ -210,6 +218,19 @@ class Analysis:
         if self._observations is None:
             self._observations = self.load_observations().sort_index()
         return self._observations
+
+    @property
+    def plot_observations(self) -> pd.DataFrame:
+        """The observations as shown in plots: with the ``unshift`` columns moved back to their own time."""
+        if self._plot_observations is None:
+            observations = self.observations.copy()
+            for column, n in self.unshift.items():
+                if column not in observations.columns:
+                    msg = f"unshift: {column!r} is not a column of the observations"
+                    raise KeyError(msg)
+                observations[column] = observations[column].shift(n)
+            self._plot_observations = observations
+        return self._plot_observations
 
     def model(self, run: str) -> Any:
         """Return the loaded model of a run, loaded once."""
@@ -282,16 +303,16 @@ class Analysis:
         return data[columns + [c for c in data.columns if c not in columns]]
 
     def plot_issue(self, forecasts: pd.DataFrame, issue_time: Any, **options: Any) -> plots.FigureResult:
-        """See plot_issue; ``secondary`` may also be column name(s) of the observations."""
-        return plots.plot_issue(forecasts, issue_time, **self._resolve_secondary(options))
+        """See plot_issue. Uses the full observations, ``secondary`` may also be column name(s) of them."""
+        return plots.plot_issue(forecasts, issue_time, **self._plot_options(forecasts, options))
 
     def plot_lead(self, forecasts: pd.DataFrame, steps: int | Iterable[int], **options: Any) -> plots.FigureResult:
-        """See plot_lead; ``secondary`` may also be column name(s) of the observations."""
-        return plots.plot_lead(forecasts, steps, **self._resolve_secondary(options))
+        """See plot_lead. Uses the full observations, ``secondary`` may also be column name(s) of them."""
+        return plots.plot_lead(forecasts, steps, **self._plot_options(forecasts, options))
 
     def plot_forecasts(self, forecasts: pd.DataFrame, **options: Any) -> plots.FigureResult:
-        """See plot_forecasts; ``secondary`` may also be column name(s) of the observations."""
-        return plots.plot_forecasts(forecasts, **self._resolve_secondary(options))
+        """See plot_forecasts. Uses the full observations, ``secondary`` may also be column name(s) of them."""
+        return plots.plot_forecasts(forecasts, **self._plot_options(forecasts, options))
 
     # Internals.
 
@@ -369,11 +390,25 @@ class Analysis:
             raise ValueError(msg)
         return select_times(self.observations.index, start=start, end=end, every=every, hours=hours)
 
-    def _resolve_secondary(self, options: dict[str, Any]) -> dict[str, Any]:
+    def _plot_options(self, forecasts: pd.DataFrame, options: dict[str, Any]) -> dict[str, Any]:
+        """Fill in the observed target and resolve secondary column names from the observations."""
+        options = dict(options)
         secondary = options.get("secondary")
         if isinstance(secondary, str) or (isinstance(secondary, list) and all(isinstance(s, str) for s in secondary)):
-            options = {**options, "secondary": self.observations[secondary]}
+            options["secondary"] = self.plot_observations[secondary]
+        if options.get("observed") is None:
+            options["observed"] = self._observed_target(forecasts)
         return options
+
+    def _observed_target(self, forecasts: pd.DataFrame) -> pd.Series | None:
+        """Return the observations of the forecasts' target, None if the runs aren't ours or targets differ."""
+        try:
+            targets = {self.settings(run).target for run in forecasts["run"].astype(str).unique()}
+        except KeyError:
+            return None
+        if len(targets) != 1 or (target := targets.pop()) not in self.observations.columns:
+            return None
+        return self.observations[target]
 
 
 def _time_step(index: pd.DatetimeIndex) -> pd.Timedelta:
