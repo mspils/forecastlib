@@ -322,7 +322,7 @@ def test_select_forecasts(forecasts):
 
 
 def test_plot_forecasts(forecasts):
-    fig, data = fa.plot_forecasts(forecasts, hours=[0, 12], return_data=True)
+    fig, data = fa.plot_forecasts(forecasts, hours=[0, 12], color_by="label", return_data=True)
     issued = [t for t in forecasts["issue_time"].drop_duplicates() if t.hour in {0, 12}]
 
     assert [t.name for t in fig.data] == ["observed", "5", "9"]  # one trace per model, not per forecast
@@ -450,3 +450,23 @@ def test_unshift_only_moves_the_plotted_series(trained_runs):
 
     with pytest.raises(KeyError, match="rain"):
         fa.Analysis(runs=trained_runs, unshift={"rain": 1}).plot_forecasts(forecasts, secondary="a")
+
+
+def test_plot_forecasts_colored_by_issue_time(forecasts):
+    fig = fa.plot_forecasts(forecasts, hours=[0, 12])
+    issued = sorted(t for t in forecasts["issue_time"].drop_duplicates() if t.hour in {0, 12})
+    palette = fa.plots.FORECAST_COLORS
+
+    legend = [t for t in fig.data if t.showlegend is not False]
+    assert [t.name for t in legend] == ["observed", "5", "9"]  # still one legend entry per model
+    assert [t.line.dash for t in legend[1:]] == ["solid", "dash"]  # models differ by line style
+
+    for label, dash in (("5", "solid"), ("9", "dash")):
+        lines = [t for t in fig.data if t.name == label and t.showlegend is False]
+        assert len(lines) == len(issued)  # one line per forecast
+        assert [t.line.color for t in lines] == [palette[i % len(palette)] for i in range(len(issued))]
+        assert {t.line.dash for t in lines} == {dash}
+        assert all(t.legendgroup == label for t in lines)  # the legend entry toggles them
+
+    with pytest.raises(ValueError, match="color_by"):
+        fa.plot_forecasts(forecasts, color_by="member")

@@ -25,6 +25,8 @@ if TYPE_CHECKING:
 BAND_OPACITY = 0.2
 OBSERVED_COLOR = "#222222"
 SECONDARY_COLORS = qualitative.Dark2
+FORECAST_COLORS = qualitative.Plotly  # cycled through per issue time
+DASHES = ("solid", "dash", "dot", "dashdot", "longdash", "longdashdot")  # one per label when coloring by issue time
 TEMPLATE = "plotly_white"
 
 FigureResult = go.Figure | tuple[go.Figure, pd.DataFrame]  # the figure, or (figure, data) with return_data=True
@@ -258,14 +260,16 @@ def plot_forecasts(
     show_end: Any = None,
     observed: pd.Series | None = None,
     secondary: pd.Series | pd.DataFrame | None = None,
+    color_by: str = "issue_time",
     title: str | None = None,
     return_data: bool = False,
 ) -> FigureResult:
     """Plot whole forecasts of several issue times against the observations, one line per forecast.
 
-    Lines are colored by label with one legend entry per label. The issue times are picked with select_forecasts;
-    the observations stay continuous however few forecasts are shown, by default from the first selected issue time
-    to the last forecast step.
+    By default each issue time gets the next color of the palette, the ensemble members of an issue time share it,
+    and the labels (models) differ by line style, with one legend entry per label. ``color_by="label"`` colors by
+    label instead. The issue times are picked with select_forecasts; the observations stay continuous however few
+    forecasts are shown, by default from the first selected issue time to the last forecast step.
 
     Args:
         forecasts: A predict table (or a filtered part of it).
@@ -278,11 +282,15 @@ def plot_forecasts(
         observed: The full observed target indexed by time, e.g. from the data file. Default: the observations in
             the forecast table, which only cover the predicted period. Analysis passes its observations.
         secondary: Series or DataFrame indexed by time, e.g. columns of load_data, drawn dotted on a second y-axis.
+        color_by: "issue_time" (cycle through the colors, one per forecast) or "label" (one color per label).
         title: Figure title.
         return_data: Also return the plotted data: label, run, issue_time, step, time, value, axis and the
             quantile columns. Observations have the label "observed", secondary series their column name.
 
     """
+    if color_by not in {"issue_time", "label"}:
+        msg = f"color_by must be 'issue_time' or 'label', got {color_by!r}"
+        raise ValueError(msg)
     selected = select_forecasts(forecasts, start=start, end=end, every=every, hours=hours)
     if selected.empty:
         msg = "No forecasts left after selecting by start, end, every and hours"
@@ -303,25 +311,68 @@ def plot_forecasts(
         go.Scatter(x=observed.index, y=observed, mode="lines", name="observed", line={"color": OBSERVED_COLOR})
     )
     labels = _labels(selected)
+    if color_by == "label":
+        _add_forecast_lines_by_label(fig, selected, labels)
+    else:
+        _add_forecast_lines_by_issue_time(fig, selected, labels)
+    data = pd.concat([data, _add_secondary(fig, secondary, first, last)], ignore_index=True)
+    fig.update_layout(title=title, template=TEMPLATE)
+    if show_start is not None or show_end is not None:
+        fig.update_xaxes(range=[first, last])
+    return (fig, data) if return_data else fig
+
+
+def _add_forecast_lines_by_label(fig: go.Figure, forecasts: pd.DataFrame, labels: list[str]) -> None:
+    """One trace per label, its forecasts separated by gaps."""
     colors = _colors(labels)
     for label in labels:
-        x, y, issued = _with_gaps(selected[selected["label"] == label])
+        x, y, issued = _with_gaps(forecasts[forecasts["label"] == label])
         fig.add_trace(
             go.Scatter(
                 x=x,
                 y=y,
                 mode="lines",
                 name=label,
+                legendgroup=label,
                 line={"color": colors[label], "width": 1},
                 customdata=issued,
                 hovertemplate=f"{label}<br>issued %{{customdata}}<br>%{{x}}: %{{y:.4g}}<extra></extra>",
             )
         )
-    data = pd.concat([data, _add_secondary(fig, secondary, first, last)], ignore_index=True)
-    fig.update_layout(title=title, template=TEMPLATE)
-    if show_start is not None or show_end is not None:
-        fig.update_xaxes(range=[first, last])
-    return (fig, data) if return_data else fig
+
+
+def _add_forecast_lines_by_issue_time(fig: go.Figure, forecasts: pd.DataFrame, labels: list[str]) -> None:
+    """One trace per label and issue time, colored by issue time, the members of an issue time in one trace."""
+    issue_times = forecasts["issue_time"].drop_duplicates().sort_values()
+    colors = {t: FORECAST_COLORS[i % len(FORECAST_COLORS)] for i, t in enumerate(issue_times)}
+    dashes = {label: DASHES[i % len(DASHES)] for i, label in enumerate(labels)}
+    for label in labels:
+        # The legend entry shows the label's line style; it toggles all of the label's forecasts.
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="lines",
+                name=label,
+                legendgroup=label,
+                line={"color": "grey", "dash": dashes[label]},
+            )
+        )
+        for issue_time, forecast in forecasts[forecasts["label"] == label].groupby("issue_time", sort=True):
+            x, y, issued = _with_gaps(forecast)
+            fig.add_trace(
+                go.Scatter(
+                    x=x,
+                    y=y,
+                    mode="lines",
+                    name=label,
+                    legendgroup=label,
+                    showlegend=False,
+                    line={"color": colors[issue_time], "width": 1, "dash": dashes[label]},
+                    customdata=issued,
+                    hovertemplate=f"{label}<br>issued %{{customdata}}<br>%{{x}}: %{{y:.4g}}<extra></extra>",
+                )
+            )
 
 
 def select_forecasts(

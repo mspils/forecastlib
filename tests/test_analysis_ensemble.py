@@ -150,7 +150,14 @@ def test_ensemble_plots(trained, issue_times):
     forecasts = analysis.predict(issue_times=issue_times)
 
     fig = analysis.plot_forecasts(forecasts)
-    line = next(t for t in fig.data if t.name == "shift")
+    lines = [t for t in fig.data if t.name == "shift" and t.showlegend is False]
+    assert len(lines) == len(issue_times)  # one trace per issue time ...
+    for line in lines:  # ... holding both members, separated by a gap, in the issue time's color
+        assert np.isnan(np.asarray(line.y, dtype=float)).sum() == 2
+    assert len({t.line.color for t in lines}) == len(issue_times)
+
+    by_label = analysis.plot_forecasts(forecasts, color_by="label")
+    line = next(t for t in by_label.data if t.name == "shift")
     assert np.isnan(np.asarray(line.y, dtype=float)).sum() == len(issue_times) * 2  # a line per issue time and member
 
     fig, data = analysis.plot_issue(forecasts, issue_times[1], secondary="precipitation", return_data=True)
