@@ -14,6 +14,7 @@ filtered and grouped with plain pandas, e.g. ``runs[runs.model == "LSTM"]``.
 
 from __future__ import annotations
 
+import struct
 import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -199,7 +200,8 @@ def _run_id(run_dir: Path, root: Path, *, prefix_root: bool) -> str:
 
 def _read_hparams(path: Path) -> dict[str, Any]:
     with path.open(encoding="utf-8") as f:
-        raw = yaml.load(f, Loader=yaml.FullLoader) or {}  # FullLoader like load_model_settings: !!binary, tuples
+        # FullLoader like load_model_settings (!!binary, tuples); its C version when PyYAML was built with libyaml.
+        raw = yaml.load(f, Loader=getattr(yaml, "CFullLoader", yaml.FullLoader)) or {}
     # Pickled objects (scaler, device) can't be compared or grouped, lists can't be hashed.
     return {k: _hashable(v) for k, v in raw.items() if not isinstance(v, bytes)}
 
@@ -226,16 +228,61 @@ def _read_scalars(run_dir: Path, source: str) -> pd.DataFrame:
 
 
 def _read_tensorboard(run_dir: Path) -> pd.DataFrame:
-    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator  # noqa: PLC0415 - slow import
+    """Read the scalars of all event files in run_dir.
 
-    accumulator = EventAccumulator(str(run_dir), size_guidance={"scalars": 0})  # 0: keep all values
-    accumulator.Reload()
-    rows = [
-        (tag, event.step, event.value, event.wall_time)
-        for tag in accumulator.Tags()["scalars"]
-        for event in accumulator.Scalars(tag)
-    ]
+    Reads the TFRecord files directly instead of through tensorboard's EventAccumulator: without TensorFlow that
+    one checks every record's checksums in pure Python and processes every event, about 12x slower.
+    """
+    rows = []
+    for path in sorted(run_dir.glob("events.out.tfevents.*")):  # the names start with the creation time
+        rows.extend(_read_event_file(path))
     return pd.DataFrame(rows, columns=["tag", "step", "value", "wall_time"])
+
+
+def _read_event_file(path: Path) -> list[tuple[str, int, float, float]]:
+    """Return (tag, step, value, wall_time) of every scalar in one event file.
+
+    A TFRecord is: data length (uint64), its crc (4 bytes), the data (an Event protobuf), the data's crc (4 bytes).
+    The checksums are skipped. A record cut off at the end, e.g. while the run is still writing, is ignored.
+    """
+    from tensorboard.compat.proto import event_pb2  # noqa: PLC0415 - slow import
+
+    data = path.read_bytes()
+    rows = []
+    position = 0
+    while position + 12 <= len(data):
+        (length,) = struct.unpack_from("<Q", data, position)
+        start = position + 12
+        if start + length + 4 > len(data):
+            break
+        event = event_pb2.Event.FromString(data[start : start + length])
+        position = start + length + 4
+        for value in event.summary.value:
+            scalar = _scalar(value)
+            if scalar is not None:
+                rows.append((value.tag, event.step, scalar, event.wall_time))
+    return rows
+
+
+def _scalar(value: Any) -> float | None:
+    """Return the number of a summary value: a simple_value, or a one-element float tensor (newer writers)."""
+    kind = value.WhichOneof("value")
+    if kind == "simple_value":
+        return value.simple_value
+    if kind != "tensor":
+        return None  # histograms, images, ...
+    tensor = value.tensor
+    if len(tensor.float_val) == 1:
+        return tensor.float_val[0]
+    if len(tensor.double_val) == 1:
+        return tensor.double_val[0]
+    dtype = _TENSOR_DTYPES.get(tensor.dtype)
+    if dtype is not None and len(tensor.tensor_content) == np.dtype(dtype).itemsize:
+        return float(np.frombuffer(tensor.tensor_content, dtype=dtype)[0])
+    return None  # text, multi-element tensors, ...
+
+
+_TENSOR_DTYPES = {1: "<f4", 2: "<f8"}  # tensorflow DataType: DT_FLOAT, DT_DOUBLE
 
 
 def _read_csv(path: Path) -> pd.DataFrame:
@@ -250,15 +297,17 @@ def _empty_scalars() -> pd.DataFrame:
 
 def _split_scalars(scalars: pd.DataFrame, pred_len: int | None) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Separate per-horizon metrics (steps exactly 1..pred_len) from the training history."""
-    horizon_tags = []
-    for tag, group in scalars.groupby("tag"):
-        steps = sorted(group["step"].astype(int))
-        n = len(steps)
-        expected = n if pred_len is None else pred_len
-        if tag != "epoch" and steps == list(range(1, n + 1)) and n == expected and (n > 1 or pred_len == 1):
-            horizon_tags.append(tag)
-
-    is_horizon = scalars["tag"].isin(horizon_tags)
+    # The steps of a tag are unique (_read_scalars drops duplicates), so 1..n means min 1 and max n.
+    stats = scalars.groupby("tag")["step"].agg(["count", "min", "max"])
+    expected = stats["count"] if pred_len is None else pred_len
+    horizon = (
+        (stats.index != "epoch")
+        & (stats["min"] == 1)
+        & (stats["max"] == stats["count"])
+        & (stats["count"] == expected)
+        & ((stats["count"] > 1) | (pred_len == 1))
+    )
+    is_horizon = scalars["tag"].isin(stats.index[horizon])
     metrics = scalars[is_horizon].copy()
     parts = metrics["tag"].str.split("_", n=1, expand=True).reindex(columns=[0, 1])
     has_split = parts[0].isin(SPLITS) & parts[1].notna()

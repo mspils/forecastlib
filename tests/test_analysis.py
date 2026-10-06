@@ -470,3 +470,52 @@ def test_plot_forecasts_colored_by_issue_time(forecasts):
 
     with pytest.raises(ValueError, match="color_by"):
         fa.plot_forecasts(forecasts, color_by="member")
+
+
+def test_event_reader_matches_tensorboard(log_dir):
+    """The direct event file reader returns what tensorboard's EventAccumulator reads."""
+    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator  # noqa: PLC0415
+
+    for run in RUN_IDS:
+        run_dir = log_dir / run
+        if not list(run_dir.glob("events.out.tfevents.*")):
+            pytest.skip("CSVLogger runs have no event files")
+        ours = fa.runs._read_tensorboard(run_dir)
+        accumulator = EventAccumulator(str(run_dir), size_guidance={"scalars": 0})
+        accumulator.Reload()
+        theirs = pd.DataFrame(
+            [(t, e.step, e.value) for t in accumulator.Tags()["scalars"] for e in accumulator.Scalars(t)],
+            columns=["tag", "step", "value"],
+        )
+
+        def key(df):
+            return df.sort_values(["tag", "step"]).reset_index(drop=True)
+
+        pd.testing.assert_frame_equal(key(ours)[["tag", "step", "value"]], key(theirs), check_dtype=False)
+
+
+def test_event_reader_tensor_scalars_and_cut_off_file(tmp_path):
+    """Newer writers store scalars as tensors; a run still writing may leave a cut-off record at the end."""
+    from tensorboard.compat.proto import event_pb2, summary_pb2, tensor_pb2  # noqa: PLC0415
+    from tensorboard.summary.writer.event_file_writer import EventFileWriter  # noqa: PLC0415
+
+    writer = EventFileWriter(str(tmp_path))
+    values = [
+        summary_pb2.Summary.Value(tag="simple", simple_value=1.5),
+        summary_pb2.Summary.Value(tag="float_val", tensor=tensor_pb2.TensorProto(dtype=1, float_val=[2.5])),
+        summary_pb2.Summary.Value(
+            tag="content", tensor=tensor_pb2.TensorProto(dtype=2, tensor_content=np.array([3.5]).tobytes())
+        ),
+        summary_pb2.Summary.Value(tag="text", tensor=tensor_pb2.TensorProto(dtype=7, string_val=[b"hello"])),
+    ]
+    for step in (1, 2):
+        writer.add_event(event_pb2.Event(step=step, wall_time=100.0 + step, summary=summary_pb2.Summary(value=values)))
+    writer.close()
+    (event_file,) = tmp_path.glob("events.out.tfevents.*")
+    with event_file.open("ab") as f:
+        f.write(b"\x40\x00\x00\x00\x00\x00\x00\x00 cut off")  # a record whose data never arrived
+
+    scalars = fa.runs._read_tensorboard(tmp_path)
+    assert set(scalars["tag"]) == {"simple", "float_val", "content"}  # text is not a scalar
+    assert scalars.groupby("tag")["value"].first().to_dict() == {"simple": 1.5, "float_val": 2.5, "content": 3.5}
+    assert sorted(scalars["step"].unique()) == [1, 2]
