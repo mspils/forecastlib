@@ -15,6 +15,10 @@
     forecasts = analysis.predict(start="2022-02-18", end="2022-02-20", hours=12, label="num_layers")
     analysis.plot_forecasts(forecasts, secondary="yw_reinbek")
 
+Runs trained with model or dataset classes outside forecastlib's registries need those classes to be loaded::
+
+    analysis = Analysis("logs/experiment_1", model_classes=[MyModel], dataset_classes=[MyDataset])
+
 Hooks: load_runs (the metric logs), load_observations (the data), load_members (ensemble forecasts per issue time),
 load_model (a run's checkpoint), make_dataset (training preprocessing on a frame), make_windows (the model inputs of
 one issue time).
@@ -63,6 +67,10 @@ class Analysis:
             forecast shifted in the file itself). For plotting they are moved n rows later, back to their own time.
             Only the ``secondary`` series of the plots are affected, the models still get the columns as in the file.
             Columns shifted by the dataset (shift_cols) are at their own time in the file already.
+        model_classes: Model classes outside forecastlib's registry that runs were trained with, e.g.
+            ``[TinyLinear]``. hparams.yaml only stores a custom class's name, so loading needs the class; it is
+            matched by ``__name__``, or pass a dict {name: class}. Built-in models need nothing.
+        dataset_classes: The same for dataset classes outside the registry (subclasses of Dataset_Custom).
 
     Attributes:
         runs: The load_runs table: per-horizon metrics with the hyperparameters. Plain pandas, filter it directly
@@ -78,6 +86,8 @@ class Analysis:
         device: str = "cpu",
         batch_size: int = 256,
         unshift: dict[str, int] | None = None,
+        model_classes: Iterable[type] | dict[str, type] | None = None,
+        dataset_classes: Iterable[type] | dict[str, type] | None = None,
     ) -> None:
         """Load the runs from logs, or take an already loaded runs table."""
         if (logs is None) == (runs is None):
@@ -87,6 +97,8 @@ class Analysis:
         self.device = device
         self.batch_size = batch_size
         self.unshift = dict(unshift or {})
+        self.model_classes = _by_name(model_classes)
+        self.dataset_classes = _by_name(dataset_classes)
         self._observations = None
         self._plot_observations = None
         # Per run, shared with filtered copies.
@@ -122,21 +134,25 @@ class Analysis:
         return None
 
     def load_model(self, path: Path) -> Any:
-        """Load a run's model. Override e.g. for models trained with custom classes (model_class=...)."""
-        from forecastlib.models.LightningWrapper import CustomLightningModule  # noqa: PLC0415 - imports every model
+        """Load a run's model, with its class from model_classes if it isn't a built-in model."""
+        from forecastlib.models.LightningWrapper import CustomLightningModule, model_dict  # noqa: PLC0415
+        from forecastlib.utils.tools import load_model_settings  # noqa: PLC0415
 
-        return CustomLightningModule.from_disk(path, device=self.device)
+        name = load_model_settings(path).model
+        model_class = _custom_class(name, self.model_classes, model_dict, "model_classes")
+        return CustomLightningModule.from_disk(path, device=self.device, model_class=model_class)
 
     def make_dataset(self, settings: ConfigTracker, frame: pd.DataFrame, flag: str) -> Dataset_Custom:
         """Build the run's dataset on a frame with the scalers saved with the model, as in training.
 
-        Default: the run's dataset class (Dataset_Custom or a subclass), see Dataset_Custom for frame and flag.
+        Default: the run's dataset class (Dataset_Custom or a subclass, from dataset_classes if it isn't a built-in
+        one), see Dataset_Custom for frame and flag.
         """
         from forecastlib.data_provider.data_loader import Dataset_Custom  # noqa: PLC0415
         from forecastlib.data_provider.data_module import data_dict  # noqa: PLC0415
-        from forecastlib.utils.tools import resolve_class  # noqa: PLC0415
 
-        dataset_class = resolve_class(settings.data, data_dict, "data")
+        name = settings.data
+        dataset_class = _custom_class(name, self.dataset_classes, data_dict, "dataset_classes") or data_dict[name]
         if not issubclass(dataset_class, Dataset_Custom):
             msg = f"{dataset_class.__name__} can't be built from a frame, override make_dataset"
             raise TypeError(msg)
@@ -409,6 +425,27 @@ class Analysis:
         if len(targets) != 1 or (target := targets.pop()) not in self.observations.columns:
             return None
         return self.observations[target]
+
+
+def _by_name(classes: Iterable[type] | dict[str, type] | None) -> dict[str, type]:
+    """Return {name: class}: a dict as given, classes under their __name__ (what hparams.yaml stores)."""
+    if classes is None:
+        return {}
+    if isinstance(classes, dict):
+        return dict(classes)
+    return {cls.__name__: cls for cls in classes}
+
+
+def _custom_class(name: str, custom: dict[str, type], registry: dict[str, type], option: str) -> type | None:
+    """Return the custom class stored under name, None for a built-in one, or fail with a hint."""
+    if name in custom:
+        return custom[name]
+    if name in registry:
+        return None
+    msg = (
+        f"{name!r} is neither built into forecastlib nor in {option}; pass the class: Analysis(..., {option}=[{name}])"
+    )
+    raise KeyError(msg)
 
 
 def _time_step(index: pd.DatetimeIndex) -> pd.Timedelta:

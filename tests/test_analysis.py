@@ -10,7 +10,9 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import default_collate
 
 from forecastlib import analysis as fa
+from forecastlib.data_provider.data_loader import Dataset_Custom
 from forecastlib.data_provider.data_module import CustomDataModule
+from forecastlib.models import DLinear
 from forecastlib.models.LightningWrapper import CustomLightningModule
 
 STEPS = 4
@@ -519,3 +521,88 @@ def test_event_reader_tensor_scalars_and_cut_off_file(tmp_path):
     assert set(scalars["tag"]) == {"simple", "float_val", "content"}  # text is not a scalar
     assert scalars.groupby("tag")["value"].first().to_dict() == {"simple": 1.5, "float_val": 2.5, "content": 3.5}
     assert sorted(scalars["step"].unique()) == [1, 2]
+
+
+class CustomLinear(torch.nn.Module):
+    """A model outside the registry: one linear layer from seq_len to pred_len per channel."""
+
+    def __init__(self, configs):
+        super().__init__()
+        self.proj = torch.nn.Linear(configs.seq_len, configs.pred_len)
+
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec):  # noqa: ARG002 - the interface all models share
+        return self.proj(x_enc.transpose(1, 2)).transpose(1, 2)
+
+
+class CustomDataset(Dataset_Custom):
+    """A dataset outside the registry."""
+
+
+@pytest.fixture(scope="module")
+def mixed_runs(tmp_path_factory):
+    """A built-in model, a custom model class and a custom dataset class in one experiment."""
+    root = tmp_path_factory.mktemp("mixed")
+    rng = np.random.default_rng(3)
+    n = 300
+    pd.DataFrame(
+        {"date": pd.date_range("2021", periods=n, freq="h"), "a": rng.random(n), "OT": rng.random(n).cumsum()}
+    ).to_csv(root / "data.csv", index=False)
+    data_args = {
+        "data": "custom",
+        "embed": "timeF",
+        "num_workers": 0,
+        "batch_size": 16,
+        "root_path": str(root),
+        "data_path": "data.csv",
+        "seq_len": SEQ_LEN,
+        "label_len": 12,
+        "pred_len": PRED_LEN,
+        "features": "MS",
+        "target": "OT",
+        "freq": "h",
+        "augmentation_ratio": 0,
+        "diff": False,
+    }
+    for name, model, dataset in (
+        ("builtin", "DLinear", "custom"),
+        ("custom_model", CustomLinear, "custom"),
+        ("custom_dataset", "DLinear", CustomDataset),
+    ):
+        dm, args = make_model_args(data_args | {"data": dataset}, model)
+        fit(CustomLightningModule(args), dm, root / "logs" / name)
+    return fa.load_history(root / "logs")
+
+
+def test_custom_classes_need_to_be_passed(mixed_runs):
+    analysis = fa.Analysis(runs=mixed_runs)
+    assert len(analysis.filter("run == 'builtin'").predict(end="2021-01-12")) > 0  # built-in: nothing needed
+
+    with pytest.raises(KeyError, match=r"model_classes=\[CustomLinear\]"):
+        analysis.filter("run == 'custom_model'").predict(end="2021-01-12")
+    with pytest.raises(KeyError, match=r"dataset_classes=\[CustomDataset\]"):
+        analysis.filter("run == 'custom_dataset'").predict(end="2021-01-12")
+
+
+@pytest.mark.parametrize("as_dict", [False, True])
+def test_custom_classes_predict(mixed_runs, as_dict):
+    model_classes = {"CustomLinear": CustomLinear} if as_dict else [CustomLinear]
+    dataset_classes = {"CustomDataset": CustomDataset} if as_dict else [CustomDataset]
+    analysis = fa.Analysis(runs=mixed_runs, model_classes=model_classes, dataset_classes=dataset_classes)
+    forecasts = analysis.predict(end="2021-01-12")
+
+    assert set(forecasts["run"]) == {"builtin", "custom_model", "custom_dataset"}
+    assert isinstance(analysis.model("custom_model").model, CustomLinear)
+    assert isinstance(analysis.model("builtin").model, DLinear.Model)
+    assert isinstance(
+        analysis.make_dataset(analysis.settings("custom_dataset"), analysis.observations, "test"), CustomDataset
+    )
+
+    # Same predictions as loading the custom model by hand.
+    path = analysis.runs.loc[analysis.runs["run"] == "custom_model", "path"].iloc[0]
+    module = CustomLightningModule.from_disk(path, device="cpu", model_class=CustomLinear)
+    dataset = analysis.make_dataset(analysis.settings("custom_model"), analysis.observations, "test")
+    with torch.no_grad():
+        module.eval()
+        _, pred, _ = module.predict_step(default_collate([dataset[0]]), 0)
+    first = forecasts[(forecasts["run"] == "custom_model") & (forecasts["issue_time"] == forecasts["issue_time"].min())]
+    assert np.allclose(first.sort_values("step")["prediction"], pred[0, :, 0].numpy(), atol=1e-5)
