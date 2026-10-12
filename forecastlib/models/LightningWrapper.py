@@ -40,6 +40,7 @@ from forecastlib.models import (
     Transformer,
     TSMixer,
     WPMixer,
+    iPatch,
     iTransformer,
     DishTS
 )
@@ -66,6 +67,7 @@ model_dict = {
     "Crossformer": Crossformer.Model,
     "FiLM": FiLM.Model,
     "iTransformer": iTransformer.Model,
+    "iPatch": iPatch.Model,
     "TiDE": TiDE.Model,
     "FreTS": FreTS.Model,
     "MambaSimple": MambaSimple.Model,
