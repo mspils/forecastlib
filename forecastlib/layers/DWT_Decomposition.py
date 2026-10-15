@@ -92,7 +92,7 @@ class Decomposition(nn.Module):
         return x
 
     def _dummy_forward(self, input_length):
-        dummy_x = torch.ones((self.batch_size, self.channel, input_length)).to(self.device)
+        dummy_x = torch.ones((self.batch_size, self.channel, input_length), device=self.device)
         yl, yh = self.dwt(dummy_x)
         la = []
         la.append(yl.shape[-1])

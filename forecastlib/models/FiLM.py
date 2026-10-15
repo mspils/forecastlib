@@ -42,7 +42,7 @@ class HiPPO_LegT(nn.Module):
         """Inputs : (length, ...)
         output : (length, ..., N) where N is the order of the HiPPO projection
         """
-        c = torch.zeros(inputs.shape[:-1] + tuple([self.N])).to(device)
+        c = torch.zeros(inputs.shape[:-1] + tuple([self.N]), device=device)
         cs = []
         for f in inputs.permute([-1, 0, 1]):
             f = f.unsqueeze(-1)

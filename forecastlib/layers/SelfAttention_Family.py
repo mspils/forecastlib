@@ -90,8 +90,9 @@ class ProbAttention(nn.Module):
         # calculate the sampled Q_K
         K_expand = K.unsqueeze(-3).expand(B, H, L_Q, L_K, E)
         # real U = U_part(factor*ln(L_k))*L_q
-        index_sample = torch.randint(L_K, (L_Q, sample_k))
-        K_sample = K_expand[:, :, torch.arange(L_Q).unsqueeze(1), index_sample, :]
+        # Index tensors on K's device: CPU ones would be copied to the GPU in every forward pass, with the CPU waiting.
+        index_sample = torch.randint(L_K, (L_Q, sample_k), device=K.device)
+        K_sample = K_expand[:, :, torch.arange(L_Q, device=K.device).unsqueeze(1), index_sample, :]
         Q_K_sample = torch.matmul(Q.unsqueeze(-2), K_sample.transpose(-2, -1)).squeeze()
 
         # find the Top_k query with sparisty measurement
@@ -99,7 +100,8 @@ class ProbAttention(nn.Module):
         M_top = M.topk(n_top, sorted=False)[1]
 
         # use the reduced Q to calculate Q_K
-        Q_reduce = Q[torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], M_top, :]  # factor*ln(L_q)
+        batch, heads = torch.arange(B, device=Q.device)[:, None, None], torch.arange(H, device=Q.device)[None, :, None]
+        Q_reduce = Q[batch, heads, M_top, :]  # factor*ln(L_q)
         Q_K = torch.matmul(Q_reduce, K.transpose(-2, -1))  # factor*ln(L_q)*L_k
 
         return Q_K, M_top
@@ -125,12 +127,13 @@ class ProbAttention(nn.Module):
 
         attn = torch.softmax(scores, dim=-1)  # nn.Softmax(dim=-1)(scores)
 
-        context_in[torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], index, :] = torch.matmul(
+        batch, heads = torch.arange(B, device=V.device)[:, None, None], torch.arange(H, device=V.device)[None, :, None]
+        context_in[batch, heads, index, :] = torch.matmul(
             attn, V
         ).type_as(context_in)
         if self.output_attention:
-            attns = (torch.ones([B, H, L_V, L_V]) / L_V).type_as(attn).to(attn.device)
-            attns[torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], index, :] = attn
+            attns = torch.ones([B, H, L_V, L_V], dtype=attn.dtype, device=attn.device) / L_V
+            attns[batch, heads, index, :] = attn
             return context_in, attns
         return context_in, None
 
@@ -208,7 +211,7 @@ class ReformerLayer(nn.Module):
             return queries
         # fill the time series
         fill_len = (self.bucket_size * 2) - (N % (self.bucket_size * 2))
-        return torch.cat([queries, torch.zeros([B, fill_len, C]).to(queries.device)], dim=1)
+        return torch.cat([queries, torch.zeros([B, fill_len, C], device=queries.device)], dim=1)
 
     def forward(self, queries, keys, values, attn_mask, tau, delta):
         # in Reformer: defalut queries=keys

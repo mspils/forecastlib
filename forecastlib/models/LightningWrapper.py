@@ -158,6 +158,10 @@ class CustomLightningModule(pl.LightningModule):
         # if self.args.model == "LSTM":
         #    self.args.target_idx = -1
         self.target_idx = self.args.target_idx
+        # The same indices as a tensor that moves with the module, for indexing GPU tensors in the training and
+        # validation steps: a Python list is copied to the GPU on every call, and the CPU waits for that copy.
+        # Not persistent, so it stays out of the checkpoint and older checkpoints load unchanged.
+        self.register_buffer("target_idx_t", torch.as_tensor(self.target_idx, dtype=torch.long), persistent=False)
 
         self.diff = self.args.diff
         if self.diff:
@@ -294,8 +298,8 @@ class CustomLightningModule(pl.LightningModule):
         # this slicing preserves: target_idx indexes the channel axis, so the
         # result is [B,pred_len,n_targets(,n_q)] and the criterion (pinball,
         # which expects exactly that extra axis) takes it from there.
-        outputs = outputs[:, -self.args.pred_len :, self.target_idx]
-        batch_y = batch_y[:, -self.args.pred_len :, self.target_idx]
+        outputs = outputs[:, -self.args.pred_len :, self.target_idx_t]
+        batch_y = batch_y[:, -self.args.pred_len :, self.target_idx_t]
         loss = self.criterion(outputs, batch_y)
 
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=False, logger=True)
@@ -305,8 +309,8 @@ class CustomLightningModule(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         outputs, batch_x, batch_y = self._common_step(batch, batch_idx)
 
-        outputs = outputs[:, -self.args.pred_len :, self.target_idx]
-        batch_y = batch_y[:, -self.args.pred_len :, self.target_idx]
+        outputs = outputs[:, -self.args.pred_len :, self.target_idx_t]
+        batch_y = batch_y[:, -self.args.pred_len :, self.target_idx_t]
         # Scalar either way, so EarlyStopping/ModelCheckpoint on val_loss are
         # unaffected by the quantile head.
         loss = self.criterion(outputs, batch_y)
@@ -446,6 +450,10 @@ class UncertaintyLightningModule(pl.LightningModule):  # TODO an Timeserieslibra
         # if self.args.model == "LSTM":
         #    self.args.target_idx = -1
         self.target_idx = self.args.target_idx
+        # The same indices as a tensor that moves with the module, for indexing GPU tensors in the training and
+        # validation steps: a Python list is copied to the GPU on every call, and the CPU waits for that copy.
+        # Not persistent, so it stays out of the checkpoint and older checkpoints load unchanged.
+        self.register_buffer("target_idx_t", torch.as_tensor(self.target_idx, dtype=torch.long), persistent=False)
 
         self.diff = self.args.diff
         if self.diff:
@@ -519,9 +527,9 @@ class UncertaintyLightningModule(pl.LightningModule):  # TODO an Timeserieslibra
 
     def training_step(self, batch, batch_idx):
         mean_prediction, uncertainty, batch_x, batch_y = self._common_step(batch, batch_idx)
-        mean_prediction = mean_prediction[:, -self.args.pred_len :, self.target_idx]
-        uncertainty = uncertainty[:, -self.args.pred_len :, self.target_idx]
-        batch_y = batch_y[:, -self.args.pred_len :, self.target_idx]
+        mean_prediction = mean_prediction[:, -self.args.pred_len :, self.target_idx_t]
+        uncertainty = uncertainty[:, -self.args.pred_len :, self.target_idx_t]
+        batch_y = batch_y[:, -self.args.pred_len :, self.target_idx_t]
 
         loss = self.criterion(mean_prediction, batch_y, uncertainty)
 
@@ -531,9 +539,9 @@ class UncertaintyLightningModule(pl.LightningModule):  # TODO an Timeserieslibra
 
     def validation_step(self, batch, batch_idx):
         mean_prediction, uncertainty, batch_x, batch_y = self._common_step(batch, batch_idx)
-        mean_prediction = mean_prediction[:, -self.args.pred_len :, self.target_idx]
-        uncertainty = uncertainty[:, -self.args.pred_len :, self.target_idx]
-        batch_y = batch_y[:, -self.args.pred_len :, self.target_idx]
+        mean_prediction = mean_prediction[:, -self.args.pred_len :, self.target_idx_t]
+        uncertainty = uncertainty[:, -self.args.pred_len :, self.target_idx_t]
+        batch_y = batch_y[:, -self.args.pred_len :, self.target_idx_t]
 
         loss = self.criterion(mean_prediction, batch_y, uncertainty)
 

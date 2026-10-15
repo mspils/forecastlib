@@ -86,3 +86,14 @@ def test_filter_without_samples_gives_nan(data_args, tmp_path):
             assert callback.metric_dict[f"{split}_{metric}_none"].shape == (PRED_LEN,)
             assert not torch.isnan(callback.metric_dict[f"{split}_{metric}_some"]).any()
             assert not torch.isnan(callback.metric_dict[f"{split}_{metric}"]).any()
+
+
+def test_target_index_buffer(data_args):
+    """target_idx as a tensor for indexing on the GPU without waits; not in checkpoints, moves with the module."""
+    _, args = make_model_args(data_args | {"features": "M"}, "DLinear")
+    module = CustomLightningModule(args)
+
+    assert module.target_idx_t.tolist() == list(module.target_idx) == [0, 1, 2]
+    assert module.target_idx_t.dtype == torch.long
+    assert "target_idx_t" not in module.state_dict()  # older checkpoints don't have it and must still load
+    assert module.to("meta").target_idx_t.device.type == "meta"

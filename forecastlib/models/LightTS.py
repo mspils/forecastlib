@@ -94,7 +94,7 @@ class Model(nn.Module):
         B, T, N = x.size()
 
         # padding
-        x = torch.cat([x, torch.zeros((B, self.seq_len - T, N)).to(x.device)], dim=1)
+        x = torch.cat([x, torch.zeros((B, self.seq_len - T, N), device=x.device)], dim=1)
 
         highway = self.ar(x.permute(0, 2, 1))
         highway = highway.permute(0, 2, 1)

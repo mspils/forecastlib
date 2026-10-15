@@ -107,8 +107,9 @@ class Model(nn.Module):
         batch_size = x.size(0)
 
         # Initialize hidden state and cell state
-        h0 = torch.zeros(self.num_layers * self.d_factor, batch_size, self.hidden_size).to(x.device)
-        c0 = torch.zeros(self.num_layers * self.d_factor, batch_size, self.hidden_size).to(x.device)
+        # Created on x's device: a CPU tensor would be copied to the GPU in every forward pass, with the CPU waiting.
+        h0 = torch.zeros(self.num_layers * self.d_factor, batch_size, self.hidden_size, device=x.device)
+        c0 = torch.zeros(self.num_layers * self.d_factor, batch_size, self.hidden_size, device=x.device)
 
         # LSTM forward pass
         lstm_out, _ = self.lstm(x, (h0, c0))
