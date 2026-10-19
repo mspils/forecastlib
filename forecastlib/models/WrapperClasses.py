@@ -52,7 +52,7 @@ class XGBoostWrapper(pl.LightningModule):
         )
         self.log_dir = self.args.log_dir
 
-        temp_hparams = {k: self.args[k] for k in self.args.accessed_attrs}
+        temp_hparams = self.args.accessed_dict()
 
         temp_hparams = temp_hparams | {"freq": "D", "kind": "XGBRegressor"}
         if self.model_id is not None:
@@ -68,7 +68,7 @@ class XGBoostWrapper(pl.LightningModule):
         Path(log_dir).mkdir(exist_ok=True, parents=True)
         self.model.save_model(Path(log_dir) / "xgboost_model.json")
 
-        temp_hparams = {k: self.args[k] for k in self.args.accessed_attrs}
+        temp_hparams = self.args.accessed_dict()
         temp_hparams = temp_hparams | {"freq": "D", "kind": "XGBRegressor"}
         if self.model_id is not None:
             temp_hparams["model_id"] = self.model_id
@@ -241,7 +241,7 @@ class PastasWrapper(pl.LightningModule):
                 self.model.add_stressmodel(well_model)
 
         # Save hyperparameters
-        temp_hparams = {k: self.args[k] for k in self.args.accessed_attrs if k != "log_dir"}
+        temp_hparams = {k: v for k, v in self.args.accessed_dict().items() if k != "log_dir"}
         temp_hparams = temp_hparams | {
             "kind": "PastasModel",
             "freq": self.freq,
@@ -269,7 +269,7 @@ class PastasWrapper(pl.LightningModule):
 
         # Save hyperparameters
         temp_hparams = {
-            k: self.args[k] for k in self.args.accessed_attrs if k not in ["log_dir", "obs_train", "prec", "evap"]
+            k: v for k, v in self.args.accessed_dict().items() if k not in ["log_dir", "obs_train", "prec", "evap"]
         }
         temp_hparams = temp_hparams | {
             "kind": "PastasModel",

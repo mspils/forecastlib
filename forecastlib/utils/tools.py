@@ -4,6 +4,7 @@ import contextlib
 import inspect
 import pickle
 from argparse import Namespace
+from collections.abc import Mapping
 from itertools import product
 from pathlib import Path
 from typing import Any
@@ -12,44 +13,145 @@ import torch
 import yaml
 
 
-class ConfigTracker:
-    """Basically a dotdict that keeps track of what has been accessed via self.var."""
+class ConfigTracker(Mapping):
+    """A configuration that remembers which settings were read.
 
-    # pylint: disable=no-member
-    def __init__(self, config: dict | Namespace | Any) -> None:
-        """Create a ConfigTracker from a dict or similar."""
-        self._config = config
-        self.accessed_attrs = set()
+    Modules wrap their configuration in one and save the settings they actually read as hyperparameters, so a run
+    folder or database entry holds exactly what is needed to rebuild the model.
+
+    Rules:
+        * One store: ``cfg.name = v`` and ``cfg["name"] = v`` write to the same dict that ``cfg.name``, ``cfg["name"]``,
+          ``"name" in cfg``, iteration, ``dict(cfg)`` and ``str(cfg)`` read from.
+        * Tracked reads: ``cfg.name``, ``getattr(cfg, "name", default)``, ``hasattr`` and ``cfg.get("name", default)``
+          mark a setting as accessed when it exists.
+        * Untracked reads: ``cfg["name"]``, ``in``, iteration, ``to_dict()`` and printing.
+          Writing never marks a setting.
+        * Wrapping copies: ``ConfigTracker(other)`` starts from a shallow copy of ``other``'s settings with an empty
+          access record, so reads by one module never show up in another module's tracker and writes don't leak back.
+        * Missing settings raise ``AttributeError`` for attribute access and ``KeyError`` for ``[]``, like an object
+          and a dict do.
+
+    Settings named like the methods (``get``, ``keys``, ``items``, ``values``, ``to_dict``, ``accessed_dict``,
+    ``accessed_attrs``) can only be read with ``[]``.
+    """
+
+    __slots__ = ("_accessed", "_data")
+
+    def __init__(self, config: "Mapping | Namespace | ConfigTracker | None" = None, /, **overrides: Any) -> None:
+        """Create a tracker from a dict-like object, an ``argparse.Namespace`` or another tracker (copied)."""
+        if config is None:
+            data = {}
+        elif isinstance(config, ConfigTracker):
+            data = dict(config._data)  # noqa: SLF001
+        elif isinstance(config, Mapping):
+            data = dict(config)
+        elif hasattr(config, "__dict__"):
+            data = dict(vars(config))
+        else:
+            msg = f"Cannot build a ConfigTracker from {type(config).__name__}"
+            raise TypeError(msg)
+        data.update(overrides)
+        object.__setattr__(self, "_data", data)
+        object.__setattr__(self, "_accessed", {})  # dict as an ordered set
+
+    # --- attribute access (tracked) -------------------------------------------------------------------------------
 
     def __getattr__(self, name: str) -> Any:
-        """Return items from self._config.
-
-        self._config may be a dict or a ConfigTracker and adds the key to self.accessed_attrs.
-        """
+        """Read a setting and mark it as accessed. Only called when normal attribute lookup fails."""
+        if name in ConfigTracker.__slots__ or (name.startswith("__") and name.endswith("__")):
+            raise AttributeError(name)  # not a setting; also keeps copy/pickle away from the settings
         try:
-            v = self._config[name] if isinstance(self._config, dict) else getattr(self._config, name)
+            value = self._data[name]
         except KeyError:
-            raise AttributeError(name)
-        self.accessed_attrs.add(name)
-        return v
+            msg = f"No setting {name!r}"
+            raise AttributeError(msg) from None
+        self._accessed[name] = None
+        return value
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Write a setting."""
+        if name in ConfigTracker.__slots__:
+            object.__setattr__(self, name, value)
+        else:
+            self._data[name] = value
+
+    def __delattr__(self, name: str) -> None:
+        """Remove a setting."""
+        try:
+            del self._data[name]
+        except KeyError:
+            raise AttributeError(name) from None
+
+    def get(self, name: str, default: Any = None) -> Any:
+        """Read a setting like ``getattr(cfg, name, default)``: tracked if it exists."""
+        if name in self._data:
+            self._accessed[name] = None
+            return self._data[name]
+        return default
+
+    # --- dict access (untracked) ----------------------------------------------------------------------------------
 
     def __getitem__(self, name: str) -> Any:
-        """Return items from self._config which in itself may be a dict or a ConfigTracker."""
-        return self._config[name] if isinstance(self._config, dict) else getattr(self._config, name)
+        """Read a setting without marking it as accessed."""
+        return self._data[name]
 
-    def __contains__(self, name: str) -> bool:
-        """Support 'in' operator for membership testing."""
-        if isinstance(self._config, dict):
-            return name in self._config
-        return hasattr(self._config, name)
+    def __setitem__(self, name: str, value: Any) -> None:
+        """Write a setting."""
+        self._data[name] = value
+
+    def __delitem__(self, name: str) -> None:
+        """Remove a setting."""
+        del self._data[name]
+
+    def __iter__(self) -> Any:
+        """Iterate over setting names."""
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        """Number of settings."""
+        return len(self._data)
+
+    def __contains__(self, name: object) -> bool:
+        """Whether a setting exists (does not mark it as accessed)."""
+        return name in self._data
+
+    # --- tracking -------------------------------------------------------------------------------------------------
+
+    @property
+    def accessed_attrs(self) -> set[str]:
+        """Names of the settings read through attribute access or ``get``."""
+        return set(self._accessed)
+
+    def accessed_dict(self) -> dict[str, Any]:
+        """The accessed settings and their current values, in the order they were first read."""
+        return {k: self._data[k] for k in self._accessed if k in self._data}
+
+    def to_dict(self) -> dict[str, Any]:
+        """A shallow copy of all settings."""
+        return dict(self._data)
+
+    # --- misc -----------------------------------------------------------------------------------------------------
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Pickle and copy support."""
+        return {"data": self._data, "accessed": list(self._accessed)}
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Pickle and copy support."""
+        object.__setattr__(self, "_data", state["data"])
+        object.__setattr__(self, "_accessed", dict.fromkeys(state["accessed"]))
+
+    def __dir__(self) -> list[str]:
+        """Include setting names for autocompletion."""
+        return sorted({*super().__dir__(), *(k for k in self._data if isinstance(k, str))})
 
     def __str__(self) -> str:
-        """Return (str(self._config))."""
-        return str(self._config)
+        """The settings as a dict."""
+        return str(self._data)
 
     def __repr__(self) -> str:
-        """Return string representation os self._config."""
-        return self._config.__repr__()
+        """``ConfigTracker({...})``."""
+        return f"ConfigTracker({self._data!r})"
 
 
 def parse_yaml_combinations(yaml_path: Path) -> list[dict]:

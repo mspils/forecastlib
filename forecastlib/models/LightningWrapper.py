@@ -214,7 +214,7 @@ class CustomLightningModule(pl.LightningModule):
             *self.example_input_array
         )  # This assures that parameters that aren't accessed in the __init__ are still available as a hparam
 
-        temp_hparams = {k: self.args[k] for k in self.args.accessed_attrs}
+        temp_hparams = self.args.accessed_dict()
         temp_hparams["model"] = self.model_name  # args.model may be a class, which can't go into hparams.yaml
 
         try:
@@ -484,7 +484,7 @@ class UncertaintyLightningModule(pl.LightningModule):  # TODO an Timeserieslibra
             *self.example_input_array
         )  # This assures that parameters that aren't accessed in the __init__ are still available as a hparam
 
-        temp_hparams = {k: self.args[k] for k in self.args.accessed_attrs}
+        temp_hparams = self.args.accessed_dict()
         temp_hparams["model"] = self.model_name  # args.model may be a class, which can't go into hparams.yaml
 
         temp_hparams = temp_hparams | {"patience": args.patience}
@@ -747,7 +747,7 @@ class EnsembleModule(pl.LightningModule):
             *self.example_input_array
         )  # This assures that parameters that aren't accessed in the __init__ are still available as a hparam
 
-        temp_hparams = {k: self.args[k] for k in self.args.accessed_attrs}
+        temp_hparams = self.args.accessed_dict()
 
         temp_hparams.pop("model_list")
         temp_hparams = temp_hparams | {"patience": args.patience, "model_path_list": self.model_path_list}

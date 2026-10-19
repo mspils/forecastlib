@@ -32,9 +32,9 @@ class CustomDataModule(pl.LightningDataModule):
         self.test_set = None
         self.setup("fit")
 
-        temp_hparams = {}
-        for k in self.args.accessed_attrs:
-            temp_hparams[k] = self.data_name if k == "data" else self.args[k]
+        temp_hparams = self.args.accessed_dict()
+        if "data" in temp_hparams:
+            temp_hparams["data"] = self.data_name
         temp_hparams |= {
             "batch_size": self.args.batch_size,
             "scaler": pickle.dumps(self.scaler),
