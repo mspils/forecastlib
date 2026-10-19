@@ -49,6 +49,15 @@ from forecastlib.utils.timefeatures import FREQ_MAP, time_features_from_frequenc
 from forecastlib.utils.tools import ConfigTracker, class_name, load_model_settings, resolve_class
 
 
+def _inference_device(device: str | torch.device | None) -> torch.device:
+    """Device to load a stored model (database or run folder) onto: the requested one, CPU by default.
+
+    The device a model was trained on (pickled into its hparams) says nothing about the machine that loads it, so it
+    is never reused here.
+    """
+    return torch.device(device) if device is not None else torch.device("cpu")
+
+
 # Name -> model class. args.model may be one of these names or any nn.Module subclass taking (args).
 model_dict = {
     "TimesNet": TimesNet.Model,
@@ -220,37 +229,37 @@ class CustomLightningModule(pl.LightningModule):
 
     @classmethod
     def from_disk(cls, model_dir, device=None, model_class=None):
-        """Load a trained model. Pass model_class if it was trained with a class that isn't in model_dict."""
+        """Load a trained model onto ``device`` (default CPU, not the device it was trained on).
+
+        Pass model_class if it was trained with a class that isn't in model_dict.
+        """
+        device = _inference_device(device)
         if isinstance(model_dir, str):
             model_dir = Path(model_dir)
         args = load_model_settings(model_dir, device)
         args.model = model_class or args.model
         checkpoint_path = next((model_dir / "checkpoints").iterdir())
-        # model = CustomLightningModule.load_from_checkpoint(checkpoint_path,args=args)
-        #model = cls.load_from_checkpoint(checkpoint_path, args=args)
         model = cls.load_from_checkpoint(checkpoint_path, map_location=device, args=args)
 
-        return model
+        return model.to(device)
 
     @classmethod
     def from_db(cls, yaml_clob, model_blob, device=None, model_class=None):
+        """Load a model stored in the database (YAML hparams + checkpoint blob) onto ``device`` (default CPU)."""
+        device = _inference_device(device)
         yaml_data = yaml.load(yaml_clob, Loader=yaml.FullLoader)
         yaml_data["scaler"] = pickle.loads(yaml_data["scaler"])
         if "known_scaler" in yaml_data:
             yaml_data["known_scaler"] = pickle.loads(yaml_data["known_scaler"])
         yaml_data["model"] = model_class or yaml_data["model"]
-
-        if "device" in yaml_data:
-            yaml_data["device"] = pickle.loads(yaml_data["device"])
-            print(
-                "Warning: This will break if it doesn't use the same torch.device as when trained."
-            )  # TODO Fix, manual override?
+        # __init__ moves the module to args.device; use the target device, not the one it was trained on.
+        yaml_data["device"] = device
 
         yaml_data = ConfigTracker(yaml_data)
         with io.BytesIO(model_blob) as checkpoint_stream:
-            model = cls.load_from_checkpoint(checkpoint_stream, args=yaml_data)
+            model = cls.load_from_checkpoint(checkpoint_stream, map_location=device, args=yaml_data)
 
-        return model
+        return model.to(device)
 
     def forward(self, seq_x, seq_y, seq_x_mark, seq_y_mark):
         # Careful, changing order of inputs
@@ -483,27 +492,33 @@ class UncertaintyLightningModule(pl.LightningModule):  # TODO an Timeserieslibra
         self.save_hyperparameters(temp_hparams, ignore="scaler")
 
     @classmethod
-    def from_disk(cls, model_dir, model_class=None):
-        """Load a trained model. Pass model_class if it was trained with a class that isn't in uncertain_model_dict."""
+    def from_disk(cls, model_dir, model_class=None, device=None):
+        """Load a trained model onto ``device`` (default CPU, not the device it was trained on).
+
+        Pass model_class if it was trained with a class that isn't in uncertain_model_dict.
+        """
+        device = _inference_device(device)
         if isinstance(model_dir, str):
             model_dir = Path(model_dir)
-        args = load_model_settings(model_dir)
+        args = load_model_settings(model_dir, device)
         args.model = model_class or args.model
         checkpoint_path = next((model_dir / "checkpoints").iterdir())
-        # model = CustomLightningModule.load_from_checkpoint(checkpoint_path,args=args)
-        model = cls.load_from_checkpoint(checkpoint_path, args=args)
-        return model
+        model = cls.load_from_checkpoint(checkpoint_path, map_location=device, args=args)
+        return model.to(device)
 
     @classmethod
-    def from_db(cls, yaml_clob, model_blob, model_class=None):
+    def from_db(cls, yaml_clob, model_blob, model_class=None, device=None):
+        """Load a model stored in the database (YAML hparams + checkpoint blob) onto ``device`` (default CPU)."""
+        device = _inference_device(device)
         yaml_data = yaml.load(yaml_clob, Loader=yaml.FullLoader)
         yaml_data["scaler"] = pickle.loads(yaml_data["scaler"])
         yaml_data["model"] = model_class or yaml_data["model"]
+        yaml_data["device"] = device
         yaml_data = ConfigTracker(yaml_data)
         with io.BytesIO(model_blob) as checkpoint_stream:
-            model = cls.load_from_checkpoint(checkpoint_stream, args=yaml_data)
+            model = cls.load_from_checkpoint(checkpoint_stream, map_location=device, args=yaml_data)
 
-        return model
+        return model.to(device)
 
     def forward(self, seq_x, seq_y, seq_x_mark, seq_y_mark):
         dec_inp = torch.zeros_like(seq_y[:, -self.args.pred_len :, :])  # .float()
@@ -693,7 +708,7 @@ class EnsembleModule(pl.LightningModule):
         self.model_list = self.args.model_list
         try:
             self.model_path_list = self.args.model_path_list
-        except KeyError:
+        except (KeyError, AttributeError):  # ConfigTracker raises AttributeError for missing keys
             self.model_path_list = []
 
         self.args.model_count = len(self.args.model_list)
@@ -743,31 +758,47 @@ class EnsembleModule(pl.LightningModule):
             model.freeze()
             model.eval()
 
+    def _apply(self, fn, *args, **kwargs):
+        """Apply .to()/.cuda()/.double()/... to the submodels as well.
+
+        They live in a plain list on purpose: registering them as child modules would put their (frozen) weights into
+        this module's state_dict and break loading existing ensemble checkpoints. Without this, moving the ensemble
+        (e.g. by the Trainer) would leave the submodels behind on another device.
+        """
+        super()._apply(fn, *args, **kwargs)
+        for model in getattr(self, "model_list", ()):
+            model._apply(fn, *args, **kwargs)  # noqa: SLF001
+        return self
+
     @classmethod
-    def from_disk(cls, model_dir, model_list):
+    def from_disk(cls, model_dir, model_list, device=None):
+        """Load an ensemble run folder onto ``device`` (default CPU); ``model_list`` holds submodels or their folders."""
+        device = _inference_device(device)
         if isinstance(model_dir, str):
             model_dir = Path(model_dir)
 
         if not isinstance(model_list[0], CustomLightningModule):
-            model_list = [CustomLightningModule.from_disk(model_folder) for model_folder in model_list]
+            model_list = [CustomLightningModule.from_disk(model_folder, device=device) for model_folder in model_list]
 
-        args = load_model_settings(model_dir)
+        args = load_model_settings(model_dir, device)
         checkpoint_path = next((model_dir / "checkpoints").iterdir())
-        args.model_list = model_list
-        # model = CustomLightningModule.load_from_checkpoint(checkpoint_path,args=args)
-        model = cls.load_from_checkpoint(checkpoint_path, args=args)
-        return model
+        args.model_list = [model.to(device) for model in model_list]
+        model = cls.load_from_checkpoint(checkpoint_path, map_location=device, args=args)
+        return model.to(device)
 
     @classmethod
-    def from_db(cls, yaml_clob, model_blob, model_list):
+    def from_db(cls, yaml_clob, model_blob, model_list, device=None):
+        """Load an ensemble stored in the database onto ``device`` (default CPU), together with its submodels."""
+        device = _inference_device(device)
         yaml_data = yaml.load(yaml_clob, Loader=yaml.FullLoader)
         yaml_data["scaler"] = pickle.loads(yaml_data["scaler"])
+        yaml_data["device"] = device
         yaml_data = ConfigTracker(yaml_data)
 
-        yaml_data.model_list = model_list
+        yaml_data.model_list = [m.to(device) for m in model_list]
         with io.BytesIO(model_blob) as checkpoint_stream:
-            model = cls.load_from_checkpoint(checkpoint_stream, args=yaml_data)
-        return model
+            model = cls.load_from_checkpoint(checkpoint_stream, map_location=device, args=yaml_data)
+        return model.to(device)
 
     def set_return_subresults(self, return_subresults):
         self.return_subresults = return_subresults
@@ -784,7 +815,8 @@ class EnsembleModule(pl.LightningModule):
             torch.Tensor: The weighted average of the predictions of the models in the ensemble.
 
         """
-        # x  =
+        # Same as CustomLightningModule: datasets may yield float64, the weighting model is float32.
+        batch = tuple(t.float() if torch.is_tensor(t) else t for t in batch)
         w = self.weighting(batch[0])
         y_hat_list = []
 

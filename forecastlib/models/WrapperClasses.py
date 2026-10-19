@@ -313,7 +313,7 @@ class PastasWrapper(pl.LightningModule):
 
     @classmethod
     def from_db(cls, yaml_clob, model_blob, device=None):
-        """Load a PastasWrapper model from forecastlib.database.
+        """Load a PastasWrapper model from a database row (YAML config and model blob).
 
         Args:
             yaml_clob: YAML configuration as string/bytes

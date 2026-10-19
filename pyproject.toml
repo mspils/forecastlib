@@ -32,14 +32,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Database logging + Dash dashboard (forecastlib.database, forecastlib.dashboard, forecastlib.app)
-database = [
-    "dash>=3.3.0",
-    "dash-bootstrap-components>=1.6.0",
-    "oracledb>=3.0.0",
-    "python-dotenv>=1.0.1",
-    "sqlalchemy>=2.0.44",
-]
 # Non-torch model wrappers (forecastlib.models.WrapperClasses)
 wrappers = [
     "pastas>=1.4.0",

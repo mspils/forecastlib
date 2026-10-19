@@ -1,10 +1,13 @@
+import pickle
+
 import pytest
 import torch
+import yaml
 from conftest import PRED_LEN, fit, make_model_args
 from torch import nn
 
 from forecastlib.models import DLinear
-from forecastlib.models.LightningWrapper import CustomLightningModule
+from forecastlib.models.LightningWrapper import CustomLightningModule, EnsembleModule
 from forecastlib.utils.callbacks import StepWiseMetricsCallback, StepWiseMetricsCallbackWaterlevel
 
 
@@ -97,3 +100,75 @@ def test_target_index_buffer(data_args):
     assert module.target_idx_t.dtype == torch.long
     assert "target_idx_t" not in module.state_dict()  # older checkpoints don't have it and must still load
     assert module.to("meta").target_idx_t.device.type == "meta"
+
+
+def test_from_db_ignores_training_device(data_args, tmp_path):
+    """A model stored with the device it was trained on (here a GPU this machine doesn't have) loads onto the
+    requested device and predicts; the training device must not leak into inference."""
+    dm, args = make_model_args(data_args, "DLinear")
+    args.device = torch.device("cpu")
+    fit(CustomLightningModule(args), dm, tmp_path)
+
+    hparams = yaml.load((tmp_path / "hparams.yaml").read_text(), Loader=yaml.FullLoader)
+    assert "scaler" in hparams
+    hparams["device"] = pickle.dumps(torch.device("cuda:1"))  # as stored by a run on another machine's GPU
+    yaml_clob = yaml.dump(hparams)
+    blob = next((tmp_path / "checkpoints").iterdir()).read_bytes()
+
+    model = CustomLightningModule.from_db(yaml_clob, blob)
+    assert {p.device for p in model.parameters()} == {torch.device("cpu")}
+    assert model.args.device == torch.device("cpu")
+    model.eval()
+    batch = next(iter(dm.test_dataloader()))
+    with torch.no_grad():
+        _x, pred, true = model.predict_step(batch, batch_idx=0)
+    assert pred.shape == true.shape
+    assert torch.isfinite(pred).all()
+
+
+def test_from_disk_ignores_training_device(data_args, tmp_path):
+    """Same as for the database: a run folder from another machine's GPU loads onto the requested device."""
+    dm, args = make_model_args(data_args, "DLinear")
+    args.device = torch.device("cpu")
+    fit(CustomLightningModule(args), dm, tmp_path)
+    hparams_path = tmp_path / "hparams.yaml"
+    hparams = yaml.load(hparams_path.read_text(), Loader=yaml.FullLoader)
+    hparams["device"] = pickle.dumps(torch.device("cuda:1"))
+    hparams_path.write_text(yaml.dump(hparams))
+
+    model = CustomLightningModule.from_disk(tmp_path)
+    assert {p.device for p in model.parameters()} == {torch.device("cpu")}
+
+
+def test_ensemble_submodels_follow_the_ensemble(data_args, tmp_path):
+    """Submodels are not registered children, but .to()/.double() on the ensemble must reach them, and an ensemble
+    run folder must load again."""
+    diff_args = data_args | {"diff": True}
+    member_dirs = []
+    for i in range(2):
+        dm, args = make_model_args(diff_args, "DLinear")
+        args.device = torch.device("cpu")
+        fit(CustomLightningModule(args), dm, tmp_path / f"member{i}")
+        member_dirs.append(tmp_path / f"member{i}")
+
+    dm, args = make_model_args(diff_args, "DLinear")
+    for key, value in {
+        "model_list": [CustomLightningModule.from_disk(d) for d in member_dirs],
+        "norm_func": "softmax",
+        "hidden_size": 8,
+        "dropout": 0.0,
+        "num_layers": 2,
+    }.items():
+        setattr(args, key, value)
+    ensemble = EnsembleModule(args)
+
+    ensemble.double()
+    assert all(p.dtype == torch.float64 for m in ensemble.model_list for p in m.parameters())
+    ensemble.float()
+    assert all(p.dtype == torch.float32 for m in ensemble.model_list for p in m.parameters())
+    # The submodels' weights stay out of the ensemble's checkpoint.
+    assert all(key.startswith("weighting.") for key in ensemble.state_dict())
+
+    fit(ensemble, dm, tmp_path / "ensemble")
+    loaded = EnsembleModule.from_disk(tmp_path / "ensemble", member_dirs)
+    assert {p.device for m in loaded.model_list for p in m.parameters()} == {torch.device("cpu")}
