@@ -606,3 +606,110 @@ def test_custom_classes_predict(mixed_runs, as_dict):
         _, pred, _ = module.predict_step(default_collate([dataset[0]]), 0)
     first = forecasts[(forecasts["run"] == "custom_model") & (forecasts["issue_time"] == forecasts["issue_time"].min())]
     assert np.allclose(first.sort_values("step")["prediction"], pred[0, :, 0].numpy(), atol=1e-5)
+
+
+def test_runs_and_data_moved_elsewhere(trained_runs, forecasts, tmp_path):
+    """Run folders copied to another place (another machine) predict the same, given only the new data location."""
+    import shutil
+
+    old_logs = trained_runs.drop_duplicates("run")["path"].map(lambda p: p.parent).iloc[0]
+    old_data = fa.load_data(trained_runs)
+    new_logs = tmp_path / "elsewhere" / "logs"
+    shutil.copytree(old_logs, new_logs)
+    new_file = tmp_path / "other_name.csv"
+    old_data.rename_axis("date").reset_index().to_csv(new_file, index=False)
+
+    moved = fa.load_history(new_logs)
+    assert {str(p).startswith(str(new_logs)) for p in moved.drop_duplicates("run")["path"]} == {True}
+    for data in (new_file, str(new_file), old_data):
+        result = fa.Analysis(runs=moved, data=data).predict(label="moving_avg")
+        pd.testing.assert_frame_equal(
+            result.drop(columns=["run", "label"]).reset_index(drop=True),
+            forecasts.drop(columns=["run", "label"]).reset_index(drop=True),
+        )
+
+
+@pytest.fixture(scope="module")
+def feature_runs(tmp_path_factory):
+    """Two runs of one experiment on different data files: without and with an extra feature."""
+    root = tmp_path_factory.mktemp("mixed")
+    rng = np.random.default_rng(3)
+    n = 400
+    base = pd.DataFrame(
+        {
+            "date": pd.date_range("2021", periods=n, freq="h"),
+            "a": rng.random(n).cumsum(),
+            "OT": np.sin(np.arange(n) / 10) + rng.random(n) * 0.1,
+        }
+    )
+    base.to_csv(root / "base.csv", index=False)
+    base.assign(rain=rng.gamma(0.5, 2.0, n))[["date", "a", "rain", "OT"]].to_csv(root / "rain.csv", index=False)
+    for name in ("base", "rain"):
+        data_args = {
+            "data": "custom", "embed": "timeF", "num_workers": 0, "batch_size": 16, "root_path": str(root),
+            "data_path": f"{name}.csv", "seq_len": SEQ_LEN, "label_len": 12, "pred_len": PRED_LEN,
+            "features": "MS", "target": "OT", "freq": "h", "augmentation_ratio": 0, "diff": False,
+        }  # fmt: skip
+        dm, args = make_model_args(data_args, "DLinear")
+        fit(CustomLightningModule(args), dm, root / "logs" / name)
+    return root
+
+
+def _by_run(analysis):
+    """Forecasts of each run predicted on its own (one data file per Analysis)."""
+    return {
+        run: analysis.filter(analysis.runs["run"] == run)
+        .predict()
+        .drop(columns=["run", "label"])
+        .reset_index(drop=True)
+        for run in analysis.runs["run"].unique()
+    }
+
+
+def test_runs_with_different_data_files(feature_runs, tmp_path):
+    # These runs only log training curves, so their hyperparameters come from load_history.
+    analysis = fa.Analysis(runs=fa.load_history(feature_runs / "logs"))
+    forecasts = analysis.predict()
+    assert set(forecasts["run"]) == {"base", "rain"}
+    separate = _by_run(analysis)
+    for run, expected in separate.items():
+        got = forecasts[forecasts["run"] == run].drop(columns=["run", "label"]).reset_index(drop=True)
+        pd.testing.assert_frame_equal(got, expected)
+    # Plots see the columns of all data files.
+    assert "rain" in analysis.observations.columns
+    analysis.plot_forecasts(forecasts, secondary="rain")
+
+    # Moved elsewhere: a folder with the data files, or a mapping to renamed files / frames.
+    import shutil
+
+    shutil.copytree(feature_runs / "logs", tmp_path / "logs")
+    (tmp_path / "csv").mkdir()
+    for name in ("base", "rain"):
+        shutil.copy(feature_runs / f"{name}.csv", tmp_path / "csv" / f"{name}.csv")
+    shutil.copy(feature_runs / "rain.csv", tmp_path / "renamed_rain.csv")
+    rain_frame = fa.load_data(analysis.runs[analysis.runs["run"] == "rain"])
+    for data in (
+        tmp_path / "csv",
+        {"base.csv": tmp_path / "csv" / "base.csv", "rain.csv": tmp_path / "renamed_rain.csv"},
+        {str(feature_runs / "base.csv"): tmp_path / "csv" / "base.csv", "rain.csv": rain_frame},
+    ):
+        moved = fa.Analysis(runs=fa.load_history(tmp_path / "logs"), data=data)
+        for run, expected in separate.items():
+            result = moved.predict()
+            got = result[result["run"] == run].drop(columns=["run", "label"]).reset_index(drop=True)
+            pd.testing.assert_frame_equal(got, expected)
+
+    with pytest.raises(KeyError, match="rain.csv"):
+        fa.Analysis(runs=fa.load_history(tmp_path / "logs"), data={"base.csv": tmp_path / "csv" / "base.csv"}).predict()
+
+
+def test_load_observations_override_may_call_super(trained_runs):
+    class Noisy(fa.Analysis):
+        def load_observations(self):
+            data = super().load_observations().copy()
+            data["a"] += 0.5
+            return data
+
+    plain, noisy = fa.Analysis(runs=trained_runs), Noisy(runs=trained_runs)
+    assert np.allclose(noisy.observations["a"], plain.observations["a"] + 0.5)
+    assert not noisy.predict().empty

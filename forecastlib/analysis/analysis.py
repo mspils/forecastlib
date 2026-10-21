@@ -15,6 +15,14 @@
     forecasts = analysis.predict(start="2022-02-18", end="2022-02-20", hours=12, label="num_layers")
     analysis.plot_forecasts(forecasts, secondary="yw_reinbek")
 
+Run folders are self-contained (checkpoint, hyperparameters, scalers), so they can be copied anywhere. Only the
+data files are found through the root_path/data_path the runs were trained with. Runs may use different data files
+(e.g. with and without extra features); each run predicts on its own. On another machine point to them::
+
+    Analysis("/data/copied_logs/experiment_1", data="/data/csvs/")  # a folder with the runs' data_path files
+    Analysis(logs, data={"bille.csv": "/data/bille.csv", "bille_rain.csv": rain_frame})  # per data_path
+    Analysis(logs, data="/data/bille.csv")  # one file (or DataFrame) for all runs
+
 Runs trained with model or dataset classes outside forecastlib's registries need those classes to be loaded::
 
     analysis = Analysis("logs/experiment_1", model_classes=[MyModel], dataset_classes=[MyDataset])
@@ -27,6 +35,8 @@ one issue time).
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -46,7 +56,6 @@ from forecastlib.analysis.runs import aggregate, load_runs, summary, varying_hpa
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator
-    from pathlib import Path
 
     from forecastlib.data_provider.data_loader import Dataset_Custom
     from forecastlib.models.LightningWrapper import CustomLightningModule
@@ -71,6 +80,11 @@ class Analysis:
             ``[TinyLinear]``. hparams.yaml only stores a custom class's name, so loading needs the class; it is
             matched by ``__name__``, or pass a dict {name: class}. Built-in models need nothing.
         dataset_classes: The same for dataset classes outside the registry (subclasses of Dataset_Custom).
+        data: Where the runs' data is, instead of the file at their root_path/data_path (where it was on the
+            training machine). A folder (each run's data_path is looked up in it), a CSV file or a DataFrame for all
+            runs, or a mapping {data_path: file or DataFrame} for runs with different data files; keys may be a
+            run's data_path, its file name or the full original path. CSVs are read with the runs' date_col,
+            DataFrames are indexed by time with the columns of the training data.
 
     Attributes:
         runs: The load_runs table: per-horizon metrics with the hyperparameters. Plain pandas, filter it directly
@@ -88,6 +102,7 @@ class Analysis:
         unshift: dict[str, int] | None = None,
         model_classes: Iterable[type] | dict[str, type] | None = None,
         dataset_classes: Iterable[type] | dict[str, type] | None = None,
+        data: str | Path | pd.DataFrame | None = None,
     ) -> None:
         """Load the runs from logs, or take an already loaded runs table."""
         if (logs is None) == (runs is None):
@@ -99,7 +114,10 @@ class Analysis:
         self.unshift = dict(unshift or {})
         self.model_classes = _by_name(model_classes)
         self.dataset_classes = _by_name(dataset_classes)
-        self._observations = None
+        self.data = data
+        # Observations per data source, shared with filtered copies; the merged view for plots is per Analysis.
+        self._observations: dict[Any, pd.DataFrame] = {}
+        self._merged_observations = None
         self._plot_observations = None
         # Per run, shared with filtered copies.
         self._models: dict[str, Any] = {}
@@ -119,9 +137,10 @@ class Analysis:
     def load_observations(self) -> pd.DataFrame:
         """Return the data the models run on: indexed by time, with the columns of the training data file.
 
-        Default: the data file of the runs' hparams (root_path, data_path, date_col).
+        Override to load the data from elsewhere; the returned frame is then used for every run. By default every
+        run gets its own data file (see ``data`` and observations_for), and this returns all of them merged.
         """
-        return load_data(self.runs)
+        return self._merged(self._file_source)
 
     def load_members(self, issue_time: pd.Timestamp) -> pd.DataFrame | None:  # noqa: ARG002 - a hook
         """Return the ensemble forecasts issued at issue_time, or None for a deterministic forecast.
@@ -202,8 +221,8 @@ class Analysis:
             runs = self.runs[mask]
         filtered = copy.copy(self)
         filtered.runs = runs
-        # Our own copy; another subset may use another data file.
-        filtered._observations = filtered._plot_observations = None  # noqa: SLF001
+        # The loaded data files stay shared; the merged view depends on which runs are left.
+        filtered._merged_observations = filtered._plot_observations = None  # noqa: SLF001
         return filtered
 
     def varying_hparams(self) -> list[str]:
@@ -228,12 +247,84 @@ class Analysis:
 
     # Forecasts.
 
+    def observations_for(self, run: str) -> pd.DataFrame:
+        """The data one run predicts on, loaded once per data file."""
+        key, load = self._data_source(run)
+        if key not in self._observations:
+            self._observations[key] = load().sort_index()
+        return self._observations[key]
+
     @property
     def observations(self) -> pd.DataFrame:
-        """load_observations, loaded once."""
-        if self._observations is None:
-            self._observations = self.load_observations().sort_index()
-        return self._observations
+        """The data of all runs: their data files merged, the first run's file wins where columns overlap.
+
+        With one data file (or a load_observations override) simply that data.
+        """
+        if self._merged_observations is None:
+            self._merged_observations = self._merged(self._data_source)
+        return self._merged_observations
+
+    def _merged(self, source_of: Callable[[str], tuple[Any, Callable[[], pd.DataFrame]]]) -> pd.DataFrame:
+        """The runs' data sources merged column-wise, loaded through the shared cache."""
+        merged, seen = None, set()
+        for run in self.runs["run"].drop_duplicates():
+            key, load = source_of(run)
+            if key in seen:
+                continue
+            seen.add(key)
+            if key not in self._observations:
+                self._observations[key] = load().sort_index()
+            frame = self._observations[key]
+            if merged is None:
+                merged = frame
+            else:
+                extra = [c for c in frame.columns if c not in merged.columns]
+                merged = merged.join(frame[extra], how="outer") if extra else merged
+        if merged is None:
+            msg = "No runs, so no data"
+            raise ValueError(msg)
+        return merged.sort_index()
+
+    def _data_source(self, run: str) -> tuple[Any, Callable[[], pd.DataFrame]]:
+        """(cache key, loader) of a run's data: the load_observations override if there is one, else its file."""
+        if type(self).load_observations is not Analysis.load_observations:
+            return ("hook",), self.load_observations
+        return self._file_source(run)
+
+    def _file_source(self, run: str) -> tuple[Any, Callable[[], pd.DataFrame]]:
+        """(cache key, loader) of a run's data from ``data`` or the root_path/data_path of its hparams."""
+        rows = self.runs[self.runs["run"] == run]
+        if rows.empty:
+            msg = f"Unknown run {run!r}"
+            raise KeyError(msg)
+        row = rows.iloc[0]
+        root, data_path, date_col = row.get("root_path"), row.get("data_path"), row.get("date_col")
+        source = self.data
+        if isinstance(source, Mapping):
+            original = None if _missing(root) or _missing(data_path) else str(Path(root) / data_path)
+            candidates = [] if _missing(data_path) else [data_path, Path(data_path).name]
+            key = next((k for k in [*candidates, original] if k is not None and k in source), None)
+            if key is None:
+                msg = f"data has no entry for run {run!r} (data_path={data_path!r}); its keys: {list(source)}"
+                raise KeyError(msg)
+            source = source[key]
+        if isinstance(source, pd.DataFrame):
+            frame = source
+            return ("frame", id(frame)), frame.copy
+        if source is None:
+            if _missing(root) or _missing(data_path):
+                return ("hparams", run), lambda: load_data(rows)  # raises with a hint
+            path = Path(root) / data_path
+        elif Path(source).is_dir():
+            if _missing(data_path):
+                msg = f"Run {run!r} has no data_path hyperparameter to look up in {source}"
+                raise KeyError(msg)
+            path = Path(source) / Path(data_path).name
+        else:
+            path = Path(source)
+        return ("file", str(path), None if _missing(date_col) else date_col), lambda: load_data(
+            rows, root_path=str(path.parent), data_path=path.name
+        )
 
     @property
     def plot_observations(self) -> pd.DataFrame:
@@ -301,7 +392,7 @@ class Analysis:
         frames = []
         for run in labels:
             if ensemble:
-                times = self._ensemble_issue_times(issue_times, start, end, every, hours)
+                times = self._ensemble_issue_times(run, issue_times, start, end, every, hours)
                 data = self._predict_windows(run, times)
             else:
                 data = self._predict_split(run, split, start=start, end=end, every=every, hours=hours)
@@ -341,7 +432,7 @@ class Analysis:
 
     def _predict_split(self, run: str, split: str, **selection: Any) -> pd.DataFrame:
         settings, module = self.settings(run), self.model(run)
-        dataset = self.make_dataset(settings, self.observations, split)
+        dataset = self.make_dataset(settings, self.observations_for(run), split)
         seq_len = dataset.seq_len
         all_issue_times = dataset.dates[np.arange(len(dataset)) + seq_len - 1]
         samples = np.flatnonzero(all_issue_times.isin(select_times(all_issue_times, **selection)))
@@ -362,7 +453,7 @@ class Analysis:
 
     def _predict_windows(self, run: str, issue_times: pd.DatetimeIndex) -> pd.DataFrame:
         settings, module = self.settings(run), self.model(run)
-        observations = self.observations
+        observations = self.observations_for(run)
         keys, samples = [], []
         for issue_time in issue_times:
             for member, sample in self.make_windows(settings, observations, issue_time, self.load_members(issue_time)):
@@ -393,6 +484,7 @@ class Analysis:
 
     def _ensemble_issue_times(
         self,
+        run: str,
         issue_times: Iterable[Any] | None,
         start: Any,
         end: Any,
@@ -404,7 +496,7 @@ class Analysis:
         if start is None or end is None:
             msg = "Ensemble forecasts are built per issue time, pass start and end (or issue_times)"
             raise ValueError(msg)
-        return select_times(self.observations.index, start=start, end=end, every=every, hours=hours)
+        return select_times(self.observations_for(run).index, start=start, end=end, every=every, hours=hours)
 
     def _plot_options(self, forecasts: pd.DataFrame, options: dict[str, Any]) -> dict[str, Any]:
         """Fill in the observed target and resolve secondary column names from the observations."""
@@ -425,6 +517,10 @@ class Analysis:
         if len(targets) != 1 or (target := targets.pop()) not in self.observations.columns:
             return None
         return self.observations[target]
+
+
+def _missing(value: Any) -> bool:
+    return value is None or (isinstance(value, float) and np.isnan(value))
 
 
 def _by_name(classes: Iterable[type] | dict[str, type] | None) -> dict[str, type]:
