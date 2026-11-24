@@ -9,8 +9,48 @@ from itertools import product
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 import yaml
+
+_SafeBase = getattr(yaml, "CSafeLoader", yaml.SafeLoader)  # the C version when PyYAML was built with libyaml
+
+
+class HparamsLoader(_SafeBase):
+    """Safe YAML loader for hyperparameter files (Lightning's ``hparams.yaml``, model YAML in a database).
+
+    Plain YAML plus the tags Lightning writes for tuples, numpy scalars and numpy dtypes, decoded as data without
+    running any Python code. Other ``python/...`` tags fail with a ConstructorError naming the tag, as with
+    ``yaml.safe_load``. ``!!binary`` values stay bytes; unpickling them (scaler, device) is up to the caller.
+    """
+
+
+def _construct_numpy_dtype(loader: yaml.SafeLoader, node: yaml.Node) -> np.dtype:
+    spec = loader.construct_mapping(node, deep=True)
+    dtype = np.dtype(str(spec["args"][0]))  # a dtype name such as "U8" or "f8"
+    if dtype.hasobject:
+        msg = f"object dtype {dtype} not allowed"
+        raise yaml.constructor.ConstructorError(None, None, msg, node.start_mark)
+    order = (spec.get("state") or (None, None))[1]
+    return dtype.newbyteorder(order) if order in ("<", ">") else dtype
+
+
+def _construct_numpy_scalar(loader: yaml.SafeLoader, node: yaml.Node) -> Any:
+    dtype, raw = loader.construct_sequence(node, deep=True)
+    return np.frombuffer(raw, dtype=dtype)[0].item()  # a plain Python value (str, float, int, bool)
+
+
+HparamsLoader.add_constructor(
+    "tag:yaml.org,2002:python/tuple", lambda loader, node: tuple(loader.construct_sequence(node, deep=True))
+)
+HparamsLoader.add_constructor("tag:yaml.org,2002:python/object/apply:numpy.dtype", _construct_numpy_dtype)
+for _tag in ("numpy._core.multiarray.scalar", "numpy.core.multiarray.scalar"):  # numpy 2 / numpy 1
+    HparamsLoader.add_constructor(f"tag:yaml.org,2002:python/object/apply:{_tag}", _construct_numpy_scalar)
+
+
+def load_yaml(source: Any) -> Any:
+    """Read hyperparameter YAML (text or an open file) with HparamsLoader."""
+    return yaml.load(source, Loader=HparamsLoader)  # noqa: S506 - HparamsLoader is a SafeLoader
 
 
 class ConfigTracker(Mapping):
@@ -317,7 +357,7 @@ def load_model_settings(model_dir: Path, device: str | torch.device = None) -> C
 
     """
     with (model_dir / "hparams.yaml").open(encoding="utf-8") as file:
-        yaml_data = yaml.load(file, Loader=yaml.FullLoader)
+        yaml_data = load_yaml(file)
         for key in ("scaler", "known_scaler"):
             if key in yaml_data:
                 yaml_data[key] = pickle.loads(yaml_data[key])

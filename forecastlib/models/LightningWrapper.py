@@ -6,7 +6,6 @@ import lightning.pytorch as pl
 import numpy as np
 import torch
 import torch.nn.functional as F
-import yaml
 from torch import nn
 from torch.optim.lr_scheduler import ConstantLR, CosineAnnealingLR, ExponentialLR, LambdaLR, SequentialLR
 
@@ -15,6 +14,7 @@ from forecastlib.models import (
     MICN,
     Autoformer,
     Crossformer,
+    DishTS,
     DLinear,
     ETSformer,
     FEDformer,
@@ -42,11 +42,10 @@ from forecastlib.models import (
     WPMixer,
     iPatch,
     iTransformer,
-    DishTS
 )
 from forecastlib.utils.quantile import QuantileLoss, median_index, pinball_loss, resolve_quantiles
 from forecastlib.utils.timefeatures import FREQ_MAP, time_features_from_frequency_str
-from forecastlib.utils.tools import ConfigTracker, class_name, load_model_settings, resolve_class
+from forecastlib.utils.tools import ConfigTracker, class_name, load_model_settings, load_yaml, resolve_class
 
 
 def _inference_device(device: str | torch.device | None) -> torch.device:
@@ -247,7 +246,7 @@ class CustomLightningModule(pl.LightningModule):
     def from_db(cls, yaml_clob, model_blob, device=None, model_class=None):
         """Load a model stored in the database (YAML hparams + checkpoint blob) onto ``device`` (default CPU)."""
         device = _inference_device(device)
-        yaml_data = yaml.load(yaml_clob, Loader=yaml.FullLoader)
+        yaml_data = load_yaml(yaml_clob)
         yaml_data["scaler"] = pickle.loads(yaml_data["scaler"])
         if "known_scaler" in yaml_data:
             yaml_data["known_scaler"] = pickle.loads(yaml_data["known_scaler"])
@@ -510,7 +509,7 @@ class UncertaintyLightningModule(pl.LightningModule):  # TODO an Timeserieslibra
     def from_db(cls, yaml_clob, model_blob, model_class=None, device=None):
         """Load a model stored in the database (YAML hparams + checkpoint blob) onto ``device`` (default CPU)."""
         device = _inference_device(device)
-        yaml_data = yaml.load(yaml_clob, Loader=yaml.FullLoader)
+        yaml_data = load_yaml(yaml_clob)
         yaml_data["scaler"] = pickle.loads(yaml_data["scaler"])
         yaml_data["model"] = model_class or yaml_data["model"]
         yaml_data["device"] = device
@@ -790,7 +789,7 @@ class EnsembleModule(pl.LightningModule):
     def from_db(cls, yaml_clob, model_blob, model_list, device=None):
         """Load an ensemble stored in the database onto ``device`` (default CPU), together with its submodels."""
         device = _inference_device(device)
-        yaml_data = yaml.load(yaml_clob, Loader=yaml.FullLoader)
+        yaml_data = load_yaml(yaml_clob)
         yaml_data["scaler"] = pickle.loads(yaml_data["scaler"])
         yaml_data["device"] = device
         yaml_data = ConfigTracker(yaml_data)

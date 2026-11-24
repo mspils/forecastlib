@@ -109,7 +109,7 @@ def test_from_db_ignores_training_device(data_args, tmp_path):
     args.device = torch.device("cpu")
     fit(CustomLightningModule(args), dm, tmp_path)
 
-    hparams = yaml.load((tmp_path / "hparams.yaml").read_text(), Loader=yaml.FullLoader)
+    hparams = yaml.safe_load((tmp_path / "hparams.yaml").read_text())
     assert "scaler" in hparams
     hparams["device"] = pickle.dumps(torch.device("cuda:1"))  # as stored by a run on another machine's GPU
     yaml_clob = yaml.dump(hparams)
@@ -132,7 +132,7 @@ def test_from_disk_ignores_training_device(data_args, tmp_path):
     args.device = torch.device("cpu")
     fit(CustomLightningModule(args), dm, tmp_path)
     hparams_path = tmp_path / "hparams.yaml"
-    hparams = yaml.load(hparams_path.read_text(), Loader=yaml.FullLoader)
+    hparams = yaml.safe_load(hparams_path.read_text())
     hparams["device"] = pickle.dumps(torch.device("cuda:1"))
     hparams_path.write_text(yaml.dump(hparams))
 

@@ -22,6 +22,7 @@ Features can be extracted at various granularities (second, minute, hour, day, w
 and are automatically selected based on the frequency of the time series.
 """
 
+import re
 from typing import Literal
 
 import numpy as np
@@ -226,6 +227,25 @@ class WeekOfYear(TimeFeature):
 
 FREQ_MAP = {"h": 4, "t": 5, "s": 6, "m": 1, "a": 1, "w": 2, "W": 2, "d": 3, "D": 3, "b": 3}
 
+# forecastlib's (Time-Series-Library's) frequency codes and pandas aliases removed in pandas 3 -> current aliases.
+_PANDAS_UNITS = {
+    "t": "min", "T": "min", "m": "ME", "M": "ME", "a": "YE", "A": "YE", "y": "YE", "Y": "YE", "q": "QE", "Q": "QE",
+    "d": "D", "w": "W", "b": "B", "H": "h", "S": "s", "L": "ms", "U": "us", "N": "ns",
+}  # fmt: skip
+
+
+def pandas_freq(freq: str) -> str:
+    """Translate a frequency setting such as "t", "15t", "m" or "H" into the alias pandas 3 understands.
+
+    Settings keep forecastlib's codes (they key FREQ_MAP and the embeddings); only calls into pandas use this.
+    Anything else, e.g. "h", "15min" or "D", is returned unchanged.
+    """
+    match = re.fullmatch(r"(\d*)([A-Za-z]+)", str(freq).strip())
+    if match is None:
+        return freq
+    multiple, unit = match.groups()
+    return f"{multiple}{_PANDAS_UNITS.get(unit, unit)}"
+
 
 def time_features_from_frequency_str(freq_str: str) -> list[TimeFeature]:
     """Return a list of time features that will be appropriate for the given frequency string.
@@ -261,7 +281,7 @@ def time_features_from_frequency_str(freq_str: str) -> list[TimeFeature]:
         ],
     }
 
-    offset = to_offset(freq_str)
+    offset = to_offset(pandas_freq(freq_str))
 
     for offset_type, feature_classes in features_by_offsets.items():
         if isinstance(offset, offset_type):

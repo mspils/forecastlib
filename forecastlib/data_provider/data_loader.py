@@ -65,6 +65,25 @@ class BaseForecastDataset(Dataset):
         self.root_path = root_path
         self.data_path = data_path
 
+    def target_period(self) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+        """First and last time this split predicts a target for, None if unknown or the split has no samples.
+
+        Sample i predicts rows [i + seq_len, i + seq_len + pred_len) of the split, so the first target is row seq_len
+        and the last one row len(self) - 1 + seq_len + pred_len - 1. Needs a ``dates`` index with the time of every
+        row; datasets without one override this or return None.
+        """
+        dates = getattr(self, "dates", None)
+        if dates is None or len(self) <= 0:
+            return None
+        last = len(self) + self.seq_len + self.pred_len - 2
+        if last >= len(dates):
+            return None
+        return pd.Timestamp(dates[self.seq_len]), pd.Timestamp(dates[last])
+
+    def station_target_periods(self) -> dict[str, tuple[pd.Timestamp, pd.Timestamp]] | None:
+        """Like target_period per station, for datasets with the series of several stations; None otherwise."""
+        return None
+
 
 class Dataset_Custom(BaseForecastDataset):
     _supports_multicol = True
@@ -450,6 +469,22 @@ class Dataset_MW(BaseForecastDataset):
     def data_x_raw(self):
         first_well = next(iter(self.well_data.keys()))
         return self.well_data[first_well]["data_x_raw"]
+
+    def station_target_periods(self) -> dict[str, tuple[pd.Timestamp, pd.Timestamp]] | None:
+        """First and last target time per well (wells without a full window are not in the split)."""
+        periods = {}
+        for mw_id in self.mw_list:
+            dates = self.well_data[mw_id]["data_x_raw"].index
+            if len(dates) >= self.seq_len + self.pred_len:
+                periods[mw_id] = (pd.Timestamp(dates[self.seq_len]), pd.Timestamp(dates[-1]))
+        return periods or None
+
+    def target_period(self) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+        """The span over all wells: the earliest first and the latest last target time."""
+        periods = self.station_target_periods()
+        if not periods:
+            return None
+        return min(p[0] for p in periods.values()), max(p[1] for p in periods.values())
 
     def __getitem__(self, index):
         # Find the MW and the offset

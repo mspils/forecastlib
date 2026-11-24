@@ -21,7 +21,8 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
-import yaml
+
+from forecastlib.utils.tools import load_yaml
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -200,8 +201,8 @@ def _run_id(run_dir: Path, root: Path, *, prefix_root: bool) -> str:
 
 def _read_hparams(path: Path) -> dict[str, Any]:
     with path.open(encoding="utf-8") as f:
-        # FullLoader like load_model_settings (!!binary, tuples); its C version when PyYAML was built with libyaml.
-        raw = yaml.load(f, Loader=getattr(yaml, "CFullLoader", yaml.FullLoader)) or {}
+        # The same safe loader as load_model_settings (!!binary, tuples, numpy scalars), C-accelerated if possible.
+        raw = load_yaml(f) or {}
     # Pickled objects (scaler, device) can't be compared or grouped, lists can't be hashed.
     return {k: _hashable(v) for k, v in raw.items() if not isinstance(v, bytes)}
 

@@ -13,7 +13,7 @@ except ImportError:
     print("Pastas not available")
 
 
-from forecastlib.utils.tools import ConfigTracker, load_model_settings
+from forecastlib.utils.tools import ConfigTracker, load_model_settings, load_yaml
 
 
 class XGBoostWrapper(pl.LightningModule):
@@ -85,7 +85,6 @@ class XGBoostWrapper(pl.LightningModule):
         # model = CustomLightningModule.load_from_checkpoint(checkpoint_path,args=args)
         # model = cls.load_from_checkpoint(checkpoint_path,args=args)
 
-        # yaml_data = yaml.load(yaml_clob, Loader=yaml.FullLoader)
 
         # model = xgb.XGBRegressor()
         # yaml_data = ConfigTracker(args)
@@ -99,7 +98,7 @@ class XGBoostWrapper(pl.LightningModule):
 
     @classmethod
     def from_db(cls, yaml_clob, model_blob, device=None):
-        args = yaml.load(yaml_clob, Loader=yaml.FullLoader)
+        args = load_yaml(yaml_clob)
 
         # model = xgb.XGBRegressor()
         # yaml_data = ConfigTracker(yaml_data)
@@ -331,7 +330,7 @@ class PastasWrapper(pl.LightningModule):
         if isinstance(yaml_clob, bytes):
             yaml_clob = yaml_clob.decode("utf-8")
 
-        args = yaml.load(yaml_clob, Loader=yaml.FullLoader)
+        args = load_yaml(yaml_clob)
 
         # Deserialize and load pastas model from blob into a model object
         model = None

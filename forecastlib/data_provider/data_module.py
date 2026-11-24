@@ -2,6 +2,7 @@ import pickle
 from functools import partial
 
 import lightning.pytorch as pl
+import pandas as pd
 from torch.utils.data import DataLoader
 
 from forecastlib.data_provider.data_loader import (
@@ -42,6 +43,11 @@ class CustomDataModule(pl.LightningDataModule):
         if self.known_scaler is not None:
             # Needed by inference code to scale forecast values of the known covariates the same way.
             temp_hparams["known_scaler"] = pickle.dumps(self.known_scaler)
+        periods, station_periods = self.target_periods()
+        if periods:
+            temp_hparams["periods"] = periods
+        if station_periods:
+            temp_hparams["station_periods"] = station_periods
         self.save_hyperparameters(temp_hparams, logger=False)
         self.save_hyperparameters(
             {k: temp_hparams[k] for k in ["batch_size", "data_path", "target"]}
@@ -116,6 +122,25 @@ class CustomDataModule(pl.LightningDataModule):
         """Number of input feature columns, read from the scaler fitted during setup."""
         return self.scaler.mean_.shape[0]
 
+    def target_periods(self) -> tuple[dict[str, list[str]], dict[str, dict[str, list[str]]]]:
+        """First and last target time of each split, overall and per station (if the dataset has stations).
+
+        Returns:
+            ``({"train": [first, last], "val": ..., "test": ...}, {station: {"train": [first, last], ...}})`` with
+            times as "YYYY-MM-DD HH:MM" strings in the time zone of the data. Splits whose dataset can't tell (or
+            has no samples) are left out; the second dict is empty for single-series datasets.
+
+        """
+        periods: dict[str, list[str]] = {}
+        stations: dict[str, dict[str, list[str]]] = {}
+        for split, dataset in (("train", self.train_set), ("val", self.val_set), ("test", self.test_set)):
+            period = getattr(dataset, "target_period", lambda: None)()
+            if period is not None:
+                periods[split] = [_format_time(t) for t in period]
+            for station, station_period in (getattr(dataset, "station_target_periods", lambda: None)() or {}).items():
+                stations.setdefault(str(station), {})[split] = [_format_time(t) for t in station_period]
+        return periods, stations
+
     @property
     def feature_names(self) -> list[str] | None:
         """Ordered column names from the training set, or None if unavailable."""
@@ -182,3 +207,9 @@ class CustomDataModule(pl.LightningDataModule):
             raise ValueError(f"Invalid value {args.features!r} for features, must be M, MS, or S")
 
         return args
+
+
+def _format_time(time: pd.Timestamp) -> str:
+    """ "2023-09-02 06:00", with seconds only when the data has them."""
+    time = pd.Timestamp(time)
+    return time.strftime("%Y-%m-%d %H:%M:%S" if time.second or time.microsecond else "%Y-%m-%d %H:%M")
